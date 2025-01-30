@@ -256,7 +256,8 @@ endif
 MK_CPPFLAGS  = -Iggml/include -Iggml/src -Iinclude -Isrc -Icommon
 MK_CFLAGS    = -std=c11   -fPIC
 MK_CXXFLAGS  = -std=c++11 -fPIC
-MK_NVCCFLAGS = -std=c++11
+# Disable PTX JIT compilation, which causes a hand during model loading
+MK_NVCCFLAGS = -std=c++11 -gencode arch=compute_87,code=sm_87
 
 ifdef LLAMA_NO_CCACHE
 GGML_NO_CCACHE := 1
