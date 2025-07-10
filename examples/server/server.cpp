@@ -90,7 +90,15 @@ struct server_task {
     server_task_type type;
     json data;
 
+    uint64_t time_deferred_us_start = 0;
+    double time_deferred_ms = 0;
+    uint64_t time_queued_start = 0;
+    double time_queued_ms = 0;
+
     server_task_inf_type inf_type = SERVER_TASK_INF_TYPE_COMPLETION;
+
+
+
 
     // utility function
     static std::unordered_set<int> get_list_id(const std::vector<server_task> & tasks) {
@@ -129,6 +137,8 @@ struct slot_params {
 struct server_slot {
     int id;
     int id_task = -1;
+
+    //const server_task* task = NULL;
 
     // the index relative to completion multi-task request
     size_t index = 0;
@@ -193,6 +203,8 @@ struct server_slot {
     double t_prompt_processing; // ms
     double t_token_generation;  // ms
 
+    double task_time_deferred_ms;
+
     std::function<void(int)> callback_on_release;
 
     void reset() {
@@ -211,6 +223,8 @@ struct server_slot {
         n_sent_text        = 0;
         n_sent_token_probs = 0;
         inf_type           = SERVER_TASK_INF_TYPE_COMPLETION;
+
+
 
         generated_token_probs.clear();
     }
@@ -265,6 +279,7 @@ struct server_slot {
             {"predicted_ms",           t_token_generation},
             {"predicted_per_token_ms", t_token_generation / n_decoded},
             {"predicted_per_second",   1e3 / t_token_generation * n_decoded},
+            {"deferred_time_ms",       task_time_deferred_ms},
         };
     }
 
@@ -417,8 +432,10 @@ struct server_queue {
 
     // Add a new task, but defer until one slot is available
     void defer(server_task task) {
+        printf("!!!!!!!! >>>>>>>>>>>>>>>>>> DEFERRING TASK!!!!!\n");
         std::unique_lock<std::mutex> lock(mutex_tasks);
         QUE_DBG("defer task, id = %d\n", task.id);
+        task.time_deferred_us_start = ggml_time_us();
         queue_tasks_deferred.push_back(std::move(task));
         condition_tasks.notify_one();
     }
@@ -444,6 +461,9 @@ struct server_queue {
     void pop_deferred_task() {
         std::unique_lock<std::mutex> lock(mutex_tasks);
         if (!queue_tasks_deferred.empty()) {
+            server_task& task = queue_tasks_deferred.front();
+            task.time_deferred_ms += (ggml_time_us() - task.time_deferred_us_start)/1000.0;
+            printf("!!!!!!!! >>>>>>>>>>>>>>>>>> TASK %d has a deffered time of %f ms!!!!!\n", task.id, task.time_deferred_ms);
             queue_tasks.emplace_back(std::move(queue_tasks_deferred.front()));
             queue_tasks_deferred.pop_front();
         }
@@ -1533,9 +1553,12 @@ struct server_context {
 
                     slot->reset();
 
+
                     slot->id_task       = task.id;
+                    slot->task_time_deferred_ms = task.time_deferred_ms;
                     slot->inf_type      = task.inf_type;
                     slot->index         = json_value(task.data, "index", 0);
+                    printf(">>>>>>>>>>>>>>>>>>>>>> SELECTED TASK %d has existing deferred time of %f\n", task.id, task.time_deferred_ms);
                     slot->prompt_tokens = std::move(task.prompt_tokens);
 
                     if (!launch_slot_with_task(*slot, task)) {
@@ -1892,7 +1915,6 @@ struct server_context {
                         // empty prompt passed -> release the slot and send empty response
                         if (prompt_tokens.empty()) {
                             SLT_WRN(slot, "%s", "empty prompt - releasing slot\n");
-
                             slot.release();
                             slot.print_timings();
                             send_final_response(slot);
