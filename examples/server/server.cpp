@@ -42,6 +42,10 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <sys/io.h>
+#include <errno.h>
+
+#define BENCHMARK_PORT 0xf4
 
 using json = nlohmann::ordered_json;
 
@@ -204,6 +208,7 @@ struct server_slot {
     double t_token_generation;  // ms
 
     double task_time_deferred_ms;
+    double task_time_queues_ms;
 
     std::function<void(int)> callback_on_release;
 
@@ -606,6 +611,8 @@ struct server_response {
                 SRV_DBG("task id = %d moved to result queue\n", result.id);
 
                 queue_results.push_back(std::move(result));
+                ioperm(BENCHMARK_PORT, 1,1);
+                outb(202, BENCHMARK_PORT);
                 condition_results.notify_all();
                 return;
             }
@@ -1534,6 +1541,8 @@ struct server_context {
         switch (task.type) {
             case SERVER_TASK_TYPE_INFERENCE:
                 {
+                    ioperm(BENCHMARK_PORT, 1,1);
+                    outb(201, BENCHMARK_PORT);
                     const int id_slot = json_value(task.data, "id_slot", -1);
 
                     server_slot * slot = id_slot != -1 ? get_slot_by_id(id_slot) : get_available_slot(task);
