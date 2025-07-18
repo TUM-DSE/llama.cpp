@@ -95,8 +95,8 @@ struct server_task {
     json data;
 
     uint64_t time_deferred_us_start = 0;
+    uint64_t time_queued_us_start = 1234;
     double time_deferred_ms = 0;
-    uint64_t time_queued_start = 0;
     double time_queued_ms = 0;
 
     server_task_inf_type inf_type = SERVER_TASK_INF_TYPE_COMPLETION;
@@ -208,7 +208,7 @@ struct server_slot {
     double t_token_generation;  // ms
 
     double task_time_deferred_ms;
-    double task_time_queues_ms;
+    double task_time_queued_ms = 1234;
 
     std::function<void(int)> callback_on_release;
 
@@ -285,6 +285,7 @@ struct server_slot {
             {"predicted_per_token_ms", t_token_generation / n_decoded},
             {"predicted_per_second",   1e3 / t_token_generation * n_decoded},
             {"deferred_time_ms",       task_time_deferred_ms},
+            {"queued_time_ms",         task_time_queued_ms}
         };
     }
 
@@ -408,6 +409,10 @@ struct server_queue {
             task.id = id++;
         }
         QUE_DBG("new task, id = %d, front = %d\n", task.id, front);
+        if(task.type == SERVER_TASK_TYPE_INFERENCE) {
+            printf(">>>> Initializing task queued time for task %d (%d)\n", task.id, task.type);
+            task.time_queued_us_start = ggml_time_us();
+        }
         if (front) {
             queue_tasks.push_front(std::move(task));
         } else {
@@ -425,6 +430,10 @@ struct server_queue {
                 task.id = id++;
             }
             QUE_DBG("new task, id = %d/%d, front = %d\n", task.id, (int) tasks.size(), front);
+            if(task.type == SERVER_TASK_TYPE_INFERENCE) {
+                printf(">>>> Initializing task queued time for task %d (%d)\n", task.id, task.type);
+                task.time_queued_us_start = ggml_time_us();
+            }
             if (front) {
                 queue_tasks.push_front(std::move(task));
             } else {
@@ -441,6 +450,7 @@ struct server_queue {
         std::unique_lock<std::mutex> lock(mutex_tasks);
         QUE_DBG("defer task, id = %d\n", task.id);
         task.time_deferred_us_start = ggml_time_us();
+        task.time_queued_ms += (ggml_time_us() - task.time_queued_us_start)/1000.0;
         queue_tasks_deferred.push_back(std::move(task));
         condition_tasks.notify_one();
     }
@@ -469,6 +479,7 @@ struct server_queue {
             server_task& task = queue_tasks_deferred.front();
             task.time_deferred_ms += (ggml_time_us() - task.time_deferred_us_start)/1000.0;
             printf("!!!!!!!! >>>>>>>>>>>>>>>>>> TASK %d has a deffered time of %f ms!!!!!\n", task.id, task.time_deferred_ms);
+            task.time_queued_us_start = ggml_time_us();
             queue_tasks.emplace_back(std::move(queue_tasks_deferred.front()));
             queue_tasks_deferred.pop_front();
         }
@@ -502,6 +513,10 @@ struct server_queue {
                     break;
                 }
                 server_task task = queue_tasks.front();
+                if(task.type == SERVER_TASK_TYPE_INFERENCE) {
+                    printf(">>>>> Existing queued time for task %d (%d): %f\n", task.id, task.type ,task.time_queued_ms);
+                    task.time_queued_ms += (ggml_time_us() - task.time_queued_us_start)/1000.0;
+                }
                 queue_tasks.pop_front();
                 lock.unlock();
 
@@ -1506,7 +1521,7 @@ struct server_context {
         result_handler(results);
     }
 
-    // receive the results from task(s) created by create_tasks_inference, in stream mode
+    // receive the results from task(s) created by cmulti reate_tasks_inference, in stream mode
     void receive_cmpl_results_stream(
             const std::unordered_set<int> & id_tasks, const
             std::function<bool(server_task_result&)> & result_handler, const
@@ -1565,9 +1580,10 @@ struct server_context {
 
                     slot->id_task       = task.id;
                     slot->task_time_deferred_ms = task.time_deferred_ms;
+                    slot->task_time_queued_ms = task.time_queued_ms;
                     slot->inf_type      = task.inf_type;
                     slot->index         = json_value(task.data, "index", 0);
-                    printf(">>>>>>>>>>>>>>>>>>>>>> SELECTED TASK %d has existing deferred time of %f\n", task.id, task.time_deferred_ms);
+                    printf(">>>>>>>>>>>>>>>>>>>>>> SELECTED TASK %d has existing deferred time of %f and queued time %f\n", task.id, task.time_deferred_ms, task.time_queued_ms);
                     slot->prompt_tokens = std::move(task.prompt_tokens);
 
                     if (!launch_slot_with_task(*slot, task)) {
