@@ -99,6 +99,8 @@ struct server_task {
     double time_deferred_ms = 0;
     double time_queued_ms = 0;
 
+    int outb_id = 123;
+
     server_task_inf_type inf_type = SERVER_TASK_INF_TYPE_COMPLETION;
 
 
@@ -138,9 +140,27 @@ struct slot_params {
     std::vector<std::string> antiprompt;
 };
 
+
+
+static void my_outl(unsigned int id, unsigned int value)
+{
+        // only take the last 16 bits of each value;
+        int event_id = id & 0xFFFF;
+        int event_value = value & 0xFFFF;
+
+        int event = (event_id << 16) | event_value;
+
+        printf("Event id: %x\nEvent value: %x\nEvent: %x\n\n", event_id, event_value, event);
+
+        outl(event, BENCHMARK_PORT);
+}
+
+
 struct server_slot {
     int id;
     int id_task = -1;
+
+    int outb_id = 123;
 
     //const server_task* task = NULL;
 
@@ -617,7 +637,7 @@ struct server_response {
     }
 
     // Send a new result to a waiting id_task
-    void send(server_task_result & result) {
+    void send(server_task_result & result, int outb_id) {
         SRV_DBG("sending result for task id = %d\n", result.id);
 
         std::unique_lock<std::mutex> lock(mutex_results);
@@ -626,8 +646,10 @@ struct server_response {
                 SRV_DBG("task id = %d moved to result queue\n", result.id);
 
                 queue_results.push_back(std::move(result));
-                ioperm(BENCHMARK_PORT, 1,1);
-                outb(202, BENCHMARK_PORT);
+                if(outb_id != -1) {
+                    ioperm(BENCHMARK_PORT, 4,1);
+                    my_outl(outb_id, 202);
+                }
                 condition_results.notify_all();
                 return;
             }
@@ -1237,7 +1259,7 @@ struct server_context {
         res.error    = true;
         res.data     = format_error_response(error, type);
 
-        queue_results.send(res);
+        queue_results.send(res, -1);
     }
 
     void send_partial_response(server_slot & slot, completion_token_output tkn) {
@@ -1274,7 +1296,7 @@ struct server_context {
             res.data["model"] = slot.oaicompat_model;
         }
 
-        queue_results.send(res);
+        queue_results.send(res, -1);
     }
 
     void send_final_response(const server_slot & slot) {
@@ -1325,7 +1347,7 @@ struct server_context {
             res.data["model"] = slot.oaicompat_model;
         }
 
-        queue_results.send(res);
+        queue_results.send(res, slot.outb_id);
     }
 
     void send_embedding(const server_slot & slot, const llama_batch & batch) {
@@ -1369,7 +1391,7 @@ struct server_context {
 
         SLT_DBG(slot, "%s", "sending embeddings\n");
 
-        queue_results.send(res);
+        queue_results.send(res, -1);
     }
 
     void send_rerank(const server_slot & slot, const llama_batch & batch) {
@@ -1407,7 +1429,7 @@ struct server_context {
 
         SLT_DBG(slot, "sending rerank result, res = '%s'\n", res.data.dump().c_str());
 
-        queue_results.send(res);
+        queue_results.send(res, -1);
     }
 
     //
@@ -1552,12 +1574,13 @@ struct server_context {
     // Functions to process the task
     //
 
-    void process_single_task(const server_task & task) {
+    void process_single_task(server_task & task) {
         switch (task.type) {
             case SERVER_TASK_TYPE_INFERENCE:
                 {
-                    ioperm(BENCHMARK_PORT, 1,1);
-                    outb(201, BENCHMARK_PORT);
+                    task.outb_id = json_value(task.data, "outb_id", -1);
+                    ioperm(BENCHMARK_PORT, 4,1);
+                    my_outl(task.outb_id, 201);
                     const int id_slot = json_value(task.data, "id_slot", -1);
 
                     server_slot * slot = id_slot != -1 ? get_slot_by_id(id_slot) : get_available_slot(task);
@@ -1585,6 +1608,7 @@ struct server_context {
                     slot->index         = json_value(task.data, "index", 0);
                     printf(">>>>>>>>>>>>>>>>>>>>>> SELECTED TASK %d has existing deferred time of %f and queued time %f\n", task.id, task.time_deferred_ms, task.time_queued_ms);
                     slot->prompt_tokens = std::move(task.prompt_tokens);
+                    slot->outb_id = task.outb_id;
 
                     if (!launch_slot_with_task(*slot, task)) {
                         SRV_ERR("failed to launch slot with task, id_task = %d\n", task.id);
@@ -1671,7 +1695,7 @@ struct server_context {
                     if (json_value(task.data, "reset_bucket", false)) {
                         metrics.reset_bucket();
                     }
-                    queue_results.send(res);
+                    queue_results.send(res, -1);
                 } break;
             case SERVER_TASK_TYPE_SLOT_SAVE:
                 {
@@ -1712,7 +1736,7 @@ struct server_context {
                             { "save_ms", t_save_ms }
                         } }
                     };
-                    queue_results.send(result);
+                    queue_results.send(result, -1);
                 } break;
             case SERVER_TASK_TYPE_SLOT_RESTORE:
                 {
@@ -1760,7 +1784,7 @@ struct server_context {
                             { "restore_ms", t_restore_ms }
                         } }
                     };
-                    queue_results.send(result);
+                    queue_results.send(result, -1);
                 } break;
             case SERVER_TASK_TYPE_SLOT_ERASE:
                 {
@@ -1790,7 +1814,7 @@ struct server_context {
                         { "id_slot",  id_slot },
                         { "n_erased", n_erased }
                     };
-                    queue_results.send(result);
+                    queue_results.send(result, -1);
                 } break;
             case SERVER_TASK_TYPE_SET_LORA:
                 {
@@ -1800,7 +1824,7 @@ struct server_context {
                     result.stop = true;
                     result.error = false;
                     result.data = json{{ "success", true }};
-                    queue_results.send(result);
+                    queue_results.send(result, -1);
                 } break;
         }
     }
