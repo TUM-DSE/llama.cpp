@@ -2324,6 +2324,7 @@ void handle_completions_generic(server_task_inf_type inf_type, json & data, http
     bool stream = json_value(data, "stream", false);
     const auto task_ids = server_task::get_list_id(tasks);
 
+
     if (!stream) {
         ctx_server.receive_cmpl_results(task_ids, [&](std::vector<server_task_result> & results) {
                 if (results.size() == 1) {
@@ -2369,24 +2370,34 @@ void scan_requests(void) {
     // However, sem_wait does not seem to work when the semaphore is
     // inside of a shared memory, used by two QEMU VMs.
     //while (sem_trywait(&shm->active_reqs) != 0) {
+    //
+
+    while(true) {
+
     while (sem_wait(&shm->active_reqs) != 0) {
         printf("Scan requests taking semaphore\n");
     }
 
+    static std::thread threads[MAX_REQUESTS];
+    static json data[MAX_REQUESTS];
+    static httplib::Response res[MAX_REQUESTS];
+
     for (int i = 0; i < MAX_REQUESTS; i++) {
-    //    printf("Looking for new task %d\n", i);
         if (sem_trywait(&shm->requests[i].serverNotifier) == 0) {
             std::string req_body{shm->requests[i].text};
-            json data = json::parse(req_body);
-            httplib::Response res;
+            data[i] = json::parse(req_body);
             printf(">>>> Adding task to queue\n");
-            handle_completions_generic(SERVER_TASK_INF_TYPE_COMPLETION, data, res, i);
+
+            threads[i] = std::thread{handle_completions_generic, SERVER_TASK_INF_TYPE_COMPLETION, std::ref(data[i]), std::ref(res[i]), i};
+            threads[i].detach();
+         //   handle_completions_generic(SERVER_TASK_INF_TYPE_COMPLETION, data[i], res[i], i);
             printf(">>>> Successfully added task to queue\n");
 
             // lower numbers have higher priority
 //            if (request.prio < highest_avail_prio.load())
  //               highest_avail_prio.store(request.prio);
         }
+    }
     }
 }
 
