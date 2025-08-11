@@ -100,6 +100,7 @@ struct server_task {
     double time_queued_ms = 0;
 
     int outb_id = 123;
+    bool recorded_arrival = false;
 
     server_task_inf_type inf_type = SERVER_TASK_INF_TYPE_COMPLETION;
 
@@ -1578,9 +1579,12 @@ struct server_context {
         switch (task.type) {
             case SERVER_TASK_TYPE_INFERENCE:
                 {
-                    task.outb_id = json_value(task.data, "outb_id", -1);
-                    ioperm(BENCHMARK_PORT, 4,1);
-                    my_outl(task.outb_id, 201);
+                    if(!task.recorded_arrival)  {
+                        task.outb_id = json_value(task.data, "outb_id", -1);
+                        ioperm(BENCHMARK_PORT, 4,1);
+                        my_outl(task.outb_id, 201);
+                        task.recorded_arrival = true;
+                    }
                     const int id_slot = json_value(task.data, "id_slot", -1);
 
                     server_slot * slot = id_slot != -1 ? get_slot_by_id(id_slot) : get_available_slot(task);
