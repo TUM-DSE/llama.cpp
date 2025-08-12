@@ -48,6 +48,7 @@
 #include <errno.h>
 
 #define BENCHMARK_PORT 0xf4
+#define NUM_PRIOS 10
 
 using json = nlohmann::ordered_json;
 
@@ -95,6 +96,7 @@ struct server_task {
     int id        = -1; // to be filled by server_queue
     int id_target = -1; // used by SERVER_TASK_TYPE_CANCEL
     int shm_id    = -1;
+    int prio      = -1;
 
     llama_tokens prompt_tokens;
     server_task_type type;
@@ -150,6 +152,7 @@ struct server_slot {
     int id;
     int id_task = -1;
     int shm_id  = -1;
+    int prio    = -1;
 
     int outb_id = 123;
 
@@ -277,6 +280,7 @@ struct server_slot {
         if (is_processing()) {
             SLT_INF(*this, "stop processing: n_past = %d, truncated = %d\n", n_past, truncated);
 
+            printf("Recording end of token generation\n");
             t_last_used = ggml_time_us();
             t_token_generation = (ggml_time_us() - t_start_generation) / 1e3;
             state = SLOT_STATE_IDLE;
@@ -403,8 +407,8 @@ struct server_queue {
     bool running;
 
     // queues
-    std::deque<server_task> queue_tasks;
-    std::deque<server_task> queue_tasks_deferred;
+    std::deque<server_task> queue_tasks[NUM_PRIOS];
+    std::deque<server_task> queue_tasks_deferred[NUM_PRIOS];
 
     std::mutex mutex_tasks;
     std::condition_variable condition_tasks;
@@ -420,14 +424,18 @@ struct server_queue {
             task.id = id++;
         }
         QUE_DBG("new task, id = %d, front = %d\n", task.id, front);
+        task.prio = json_value(task.data, "prio", 9);
         if(task.type == SERVER_TASK_TYPE_INFERENCE) {
-            printf(">>>> Initializing task queued time for task %d (%d)\n", task.id, task.type);
+            task.prio = json_value(task.data, "prio", 0);
+        }
+        if(task.type == SERVER_TASK_TYPE_INFERENCE) {
+            printf(">>>> Initializing task queued time for task %d (%d), priority:%d\n", task.id, task.type, task.prio);
             task.time_queued_us_start = ggml_time_us();
         }
         if (front) {
-            queue_tasks.push_front(std::move(task));
+            queue_tasks[task.prio].push_front(std::move(task));
         } else {
-            queue_tasks.push_back(std::move(task));
+            queue_tasks[task.prio].push_back(std::move(task));
         }
         condition_tasks.notify_one();
         return task.id;
@@ -441,14 +449,20 @@ struct server_queue {
                 task.id = id++;
             }
             QUE_DBG("new task, id = %d/%d, front = %d\n", task.id, (int) tasks.size(), front);
+            task.prio = json_value(task.data, "prio", 9);
+
             if(task.type == SERVER_TASK_TYPE_INFERENCE) {
-                printf(">>>> Initializing task queued time for task %d (%d)\n", task.id, task.type);
+                task.prio = json_value(task.data, "prio", 0);
+            }
+
+            if(task.type == SERVER_TASK_TYPE_INFERENCE) {
+            printf(">>>> Initializing task queued time for task %d (%d), priority: %d\n", task.id, task.type, task.prio);
                 task.time_queued_us_start = ggml_time_us();
             }
             if (front) {
-                queue_tasks.push_front(std::move(task));
+                queue_tasks[task.prio].push_front(std::move(task));
             } else {
-                queue_tasks.push_back(std::move(task));
+                queue_tasks[task.prio].push_back(std::move(task));
             }
         }
         condition_tasks.notify_one();
@@ -457,12 +471,12 @@ struct server_queue {
 
     // Add a new task, but defer until one slot is available
     void defer(server_task task) {
-        printf("!!!!!!!! >>>>>>>>>>>>>>>>>> DEFERRING TASK!!!!!\n");
+        printf("!!!!!!!! >>>>>>>>>>>>>>>>>> DEFERRING TASK with prio: %d!!!!!\n", task.prio);
         std::unique_lock<std::mutex> lock(mutex_tasks);
         QUE_DBG("defer task, id = %d\n", task.id);
         task.time_deferred_us_start = ggml_time_us();
         task.time_queued_ms += (ggml_time_us() - task.time_queued_us_start)/1000.0;
-        queue_tasks_deferred.push_back(std::move(task));
+        queue_tasks_deferred[task.prio].push_back(std::move(task));
         condition_tasks.notify_one();
     }
 
@@ -486,13 +500,16 @@ struct server_queue {
     // Call when the state of one slot is changed, it will move one task from deferred to main queue
     void pop_deferred_task() {
         std::unique_lock<std::mutex> lock(mutex_tasks);
-        if (!queue_tasks_deferred.empty()) {
-            server_task& task = queue_tasks_deferred.front();
-            task.time_deferred_ms += (ggml_time_us() - task.time_deferred_us_start)/1000.0;
-            printf("!!!!!!!! >>>>>>>>>>>>>>>>>> TASK %d has a deffered time of %f ms!!!!!\n", task.id, task.time_deferred_ms);
-            task.time_queued_us_start = ggml_time_us();
-            queue_tasks.emplace_back(std::move(queue_tasks_deferred.front()));
-            queue_tasks_deferred.pop_front();
+        for(int i = 0; i < NUM_PRIOS; i++) {
+            if (!queue_tasks_deferred[i].empty()) {
+                server_task& task = queue_tasks_deferred[i].front();
+                task.time_deferred_ms += (ggml_time_us() - task.time_deferred_us_start)/1000.0;
+                printf("!!!!!!!! >>>>>>>>>>>>>>>>>> TASK %d (prio %d) has a deffered time of %f ms!!!!!\n", task.id, i, task.time_deferred_ms);
+                task.time_queued_us_start = ggml_time_us();
+                queue_tasks[i].emplace_back(std::move(queue_tasks_deferred[i].front()));
+                queue_tasks_deferred[i].pop_front();
+                break;
+            }
         }
         condition_tasks.notify_one();
     }
@@ -518,23 +535,32 @@ struct server_queue {
             QUE_DBG("%s", "processing new tasks\n");
 
             while (true) {
+                int top_prio = NUM_PRIOS;
                 std::unique_lock<std::mutex> lock(mutex_tasks);
-                if (queue_tasks.empty()) {
-                    lock.unlock();
-                    break;
+                for(int i = 0; i < NUM_PRIOS; i++) {
+                    if (!queue_tasks[i].empty()) {
+                        top_prio = i;
+                        break;
+                    }
                 }
-                server_task task = queue_tasks.front();
+                if(top_prio == NUM_PRIOS) {
+                    // All queues empty
+                    lock.unlock();
+                    goto list_empty;
+                }
+                server_task task = queue_tasks[top_prio].front();
                 if(task.type == SERVER_TASK_TYPE_INFERENCE) {
                     printf(">>>>> Existing queued time for task %d (%d): %f\n", task.id, task.type ,task.time_queued_ms);
                     task.time_queued_ms += (ggml_time_us() - task.time_queued_us_start)/1000.0;
                 }
-                queue_tasks.pop_front();
+                queue_tasks[top_prio].pop_front();
                 lock.unlock();
 
                 QUE_DBG("processing task, id = %d\n", task.id);
                 callback_new_task(task);
             }
-
+            // TODO: ChecK!!: Did I close the curly brackets correctly?
+list_empty:
             // all tasks in the current loop is processed, slots data is now ready
             QUE_DBG("%s", "update slots\n");
 
@@ -543,13 +569,27 @@ struct server_queue {
             QUE_DBG("%s", "waiting for new tasks\n");
             {
                 std::unique_lock<std::mutex> lock(mutex_tasks);
-                if (queue_tasks.empty()) {
+                bool all_empty = true;
+                for(int i = 0; i < NUM_PRIOS; i++) {
+                    if (!queue_tasks[i].empty()) {
+                        all_empty = false;
+                        break;
+                    }
+                }
+                if (all_empty) {
                     if (!running) {
                         QUE_DBG("%s", "terminate\n");
                         return;
                     }
                     condition_tasks.wait(lock, [&]{
-                        return (!queue_tasks.empty() || !running);
+                            if (!running) return true;
+
+                            for(int i = 0; i < NUM_PRIOS; i++) {
+                            if (!queue_tasks[i].empty()) {
+                            return true; // Have work to do
+                            }
+                            }
+                            return false; // No work, keep waiting
                     });
                 }
             }
@@ -1528,6 +1568,7 @@ struct server_context {
             const std::unordered_set<int> & id_tasks,
             const std::function<void(std::vector<server_task_result>&)> & result_handler,
             const std::function<void(json)> & error_handler) {
+        printf("In receive_cmpl_results\n");
         // TODO: currently, there is no way to detect the client has cancelled the request
         std::vector<server_task_result> results(id_tasks.size());
         for (size_t i = 0; i < id_tasks.size(); i++) {
@@ -1552,6 +1593,7 @@ struct server_context {
             const std::unordered_set<int> & id_tasks, const
             std::function<bool(server_task_result&)> & result_handler, const
             std::function<void(json)> & error_handler) {
+        printf("In receive_cmpl_results_stream\n");
         size_t n_finished = 0;
         while (true) {
             server_task_result result = queue_results.recv(id_tasks);
@@ -1617,6 +1659,7 @@ struct server_context {
                     printf(">>>>>>>>>>>>>>>>>>>>>> SELECTED TASK %d has existing deferred time of %f and queued time %f\n", task.id, task.time_deferred_ms, task.time_queued_ms);
                     slot->prompt_tokens = std::move(task.prompt_tokens);
                     slot->outb_id = task.outb_id;
+                    slot->prio    = task.prio;
 
                     if (!launch_slot_with_task(*slot, task)) {
                         SRV_ERR("failed to launch slot with task, id_task = %d\n", task.id);
@@ -1679,7 +1722,7 @@ struct server_context {
                     res.data     = {
                         { "idle",                            n_idle_slots       },
                         { "processing",                      n_processing_slots },
-                        { "deferred",                        queue_tasks.queue_tasks_deferred.size() },
+                    //    { "deferred",                        queue_tasks.queue_tasks_deferred.size() },
                         { "t_start",                         metrics.t_start},
 
                         { "n_prompt_tokens_processed_total", metrics.n_prompt_tokens_processed_total},
@@ -2374,37 +2417,35 @@ void scan_requests(void) {
 
     while(true) {
 
-    while (sem_wait(&shm->active_reqs) != 0) {
-        printf("Scan requests taking semaphore\n");
-    }
-
-    static std::thread threads[MAX_REQUESTS];
-    static json data[MAX_REQUESTS];
-    static httplib::Response res[MAX_REQUESTS];
-
-    for (int i = 0; i < MAX_REQUESTS; i++) {
-        if (sem_trywait(&shm->requests[i].serverNotifier) == 0) {
-            std::string req_body{shm->requests[i].text};
-            data[i] = json::parse(req_body);
-            printf(">>>> Adding task to queue\n");
-
-            threads[i] = std::thread{handle_completions_generic, SERVER_TASK_INF_TYPE_COMPLETION, std::ref(data[i]), std::ref(res[i]), i};
-            threads[i].detach();
-         //   handle_completions_generic(SERVER_TASK_INF_TYPE_COMPLETION, data[i], res[i], i);
-            printf(">>>> Successfully added task to queue\n");
-
-            // lower numbers have higher priority
-//            if (request.prio < highest_avail_prio.load())
- //               highest_avail_prio.store(request.prio);
+        while (sem_wait(&shm->active_reqs) != 0) {
+            printf("Scan requests taking semaphore\n");
         }
-    }
+
+        static std::thread threads[MAX_REQUESTS];
+        static json data[MAX_REQUESTS];
+        static httplib::Response res[MAX_REQUESTS];
+
+        for (int i = 0; i < MAX_REQUESTS; i++) {
+            if (sem_trywait(&shm->requests[i].serverNotifier) == 0) {
+                std::string req_body{shm->requests[i].text};
+                data[i] = json::parse(req_body);
+                printf(">>>> Adding task to queue\n");
+
+                threads[i] = std::thread{handle_completions_generic, SERVER_TASK_INF_TYPE_COMPLETION, std::ref(data[i]), std::ref(res[i]), i};
+                threads[i].detach();
+                //   handle_completions_generic(SERVER_TASK_INF_TYPE_COMPLETION, data[i], res[i], i);
+                printf(">>>> Successfully added task to queue\n");
+
+                // lower numbers have higher priority
+                //            if (request.prio < highest_avail_prio.load())
+                //               highest_avail_prio.store(request.prio);
+            }
+        }
     }
 }
 
 void update_req_list() {
-    while(true) {
-        scan_requests();
-    }
+    scan_requests();
 }
 
 static void log_server_request(const httplib::Request & req, const httplib::Response & res) {
