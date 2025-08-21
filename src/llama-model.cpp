@@ -3763,6 +3763,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
     }
 
     ml.done_getting_tensors();
+    LLAMA_LOG_INFO("%s: done getting tensors\n", __func__);
 
     ml.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr);
     pimpl->mappings.reserve(ml.mappings.size());

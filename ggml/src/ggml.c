@@ -6038,7 +6038,7 @@ struct ggml_cgraph * ggml_new_graph_custom(struct ggml_context * ctx, size_t siz
         /*.grad_accs    =*/ grad_accs_ptr,
         /*.leafs        =*/ leafs_ptr,
         /*.hash_table   =*/ { hash_size, hash_used, hash_keys_ptr },
-        /*.order        =*/ GGML_CGRAPH_EVAL_ORDER_LEFT_TO_RIGHT,
+        /*.order        =*/ GGML_CGRAPH_EVAL_ORDER_RIGHT_TO_LEFT,
     };
 
     ggml_hash_set_reset(&cgraph->visited_hash_set);

@@ -911,6 +911,7 @@ struct common_init_result common_init_from_params(common_params & params) {
     } else if (!params.model_url.empty()) {
         model = common_load_model_from_url(params.model_url, params.model, params.hf_token, mparams);
     } else {
+        printf("model loading from file\n");
         model = llama_model_load_from_file(params.model.c_str(), mparams);
     }
 
@@ -1060,6 +1061,8 @@ struct common_init_result common_init_from_params(common_params & params) {
             tmp.push_back(decoder_start_token_id);
         }
         if (llama_model_has_decoder(model)) {
+            tmp.clear();
+            tmp.push_back(eos);
             llama_decode(lctx, llama_batch_get_one(tmp.data(), std::min(tmp.size(), (size_t) params.n_batch)));
         }
         llama_kv_self_clear(lctx);
