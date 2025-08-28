@@ -220,6 +220,7 @@ struct server_slot {
 
     double t_prompt_processing; // ms
     double t_token_generation;  // ms
+    double t_token_generation_preempted;
 
     double task_time_deferred_ms;
     double task_time_queued_ms = 1234;
@@ -282,7 +283,8 @@ struct server_slot {
 
             printf("Recording end of token generation\n");
             t_last_used = ggml_time_us();
-            t_token_generation = (ggml_time_us() - t_start_generation) / 1e3;
+            t_token_generation = t_token_generation_preempted + (ggml_time_us() - t_start_generation) / 1e3;
+            t_token_generation_preempted = 0;
             state = SLOT_STATE_IDLE;
             callback_on_release(id);
         }
@@ -566,6 +568,7 @@ list_empty:
 
             callback_update_slots();
 
+
             QUE_DBG("%s", "waiting for new tasks\n");
             {
                 std::unique_lock<std::mutex> lock(mutex_tasks);
@@ -690,6 +693,7 @@ struct server_response {
                 condition_results.notify_all();
                 printf("Notifying client that request %d is ready\n", result.shm_id);
                 sem_post(&shm->requests[result.shm_id].clientNotifier);
+                printf("Did notify sem post!\n");
                 return;
             }
         }
@@ -714,6 +718,8 @@ struct server_context {
     // slots / clients
     std::vector<server_slot> slots;
     json default_generation_settings_for_props;
+
+    std::vector<server_slot> saved_slots;
 
     server_queue    queue_tasks;
     server_response queue_results;
@@ -890,6 +896,57 @@ struct server_context {
 
         return ret;
     }
+
+
+    server_slot * get_slot_by_preempt(const server_task & task) {
+
+
+        // find the lowest priority among the slots (highest number)
+        int lowest_prio = slots[0].prio;
+
+        for (server_slot& slot : slots) {
+            if(slot.prio > lowest_prio) {
+                lowest_prio = slot.prio;
+            }
+        }
+
+        if (task.prio >= lowest_prio) {
+            return nullptr;
+        }
+
+
+        // find the lowest prio slot that has at least n% prompt similarity
+        int lcs_len = 0;
+        float similarity = 0;
+        server_slot * ret = nullptr;
+
+        for (server_slot & slot : slots) {
+
+            if(slot.prio != lowest_prio) {
+                continue;
+            }
+
+            if(ret == nullptr) {
+                ret = &slot;
+            }
+
+            // length of the Longest Common Subsequence between the current slot's prompt and the input prompt
+            int cur_lcs_len = longest_common_subsequence(slot.cache_tokens, task.prompt_tokens);
+
+            // fraction of the common subsequence length compared to the current slot's prompt length
+            float cur_similarity = static_cast<int>(slot.cache_tokens.size()) != 0 ? static_cast<float>(cur_lcs_len) / static_cast<int>(slot.cache_tokens.size()) : 0;
+
+            // select the current slot if the criteria match
+            if (cur_lcs_len > lcs_len && cur_similarity > slot_prompt_similarity) {
+                lcs_len = cur_lcs_len;
+                similarity = cur_similarity;
+                ret = &slot;
+            }
+        }
+
+        return ret;
+    }
+
 
     bool launch_slot_with_task(server_slot & slot, const server_task & task) {
         slot_params default_params;
@@ -1635,6 +1692,23 @@ struct server_context {
                     server_slot * slot = id_slot != -1 ? get_slot_by_id(id_slot) : get_available_slot(task);
 
                     if (slot == nullptr) {
+                        // Try to preempt a task
+                        slot = get_slot_by_preempt(task);
+
+                        if(slot != nullptr) {
+                            printf(">>>>>>>>>>>>> CAN DO PREEMPTION\n");
+                            // save slot
+                            // TODO: Check if this is a deep or shallow copy
+                            server_slot temp_slot = *slot;
+                            temp_slot.t_token_generation_preempted += ((ggml_time_us() - temp_slot.t_start_generation) / 1e3);
+                            //common_sampler_free(temp_slot.smpl);
+                            saved_slots.push_back(temp_slot);
+                            //slot.release();
+                            slot->state = SLOT_STATE_IDLE;
+                        }
+                    }
+
+                    if (slot == nullptr) {
                         // if no slot is available, we defer this task for processing later
                         SRV_DBG("no slot is available, defer task, id_task = %d\n", task.id);
                         queue_tasks.defer(task);
@@ -1648,7 +1722,6 @@ struct server_context {
                     }
 
                     slot->reset();
-
 
                     slot->id_task       = task.id;
                     slot->shm_id        = task.shm_id;
@@ -1886,6 +1959,44 @@ struct server_context {
     }
 
     void update_slots() {
+
+        int can_restore_preempt = true;
+
+        while(can_restore_preempt) {
+            can_restore_preempt = false;
+            if(saved_slots.size() == 0) {
+                break;
+            }
+            // find highest priority saved slot (lowest number)
+            int highest_prio = saved_slots[0].prio;
+            size_t highest_prio_pos = 0;
+
+            for(size_t i = 1; i < saved_slots.size(); i++) {
+                if(saved_slots[i].prio < highest_prio) {
+                    highest_prio = saved_slots[i].prio;
+                    highest_prio_pos = i;
+                }
+            }
+
+            for(server_slot& slot: slots) {
+                if(!slot.is_processing()) {
+                    can_restore_preempt = true;
+                    // TODO: Check if deep or shallow copy
+                    slot = saved_slots[highest_prio_pos];
+                    slot.t_start_generation = ggml_time_us();
+                    printf("Updateing smpl\n");
+                    slot.smpl = common_sampler_init(model, slot.sparams);
+                    printf("Updated smpl\n");
+                    if(slot.smpl == nullptr) {
+                        printf("SMPL IS NULL !!!!!!!!!!!!\n");
+                    }
+                    saved_slots.erase(saved_slots.begin() + highest_prio_pos);
+                    break;
+                }
+            }
+
+        }
+
         // check if all slots are idle
         {
             bool all_idle = true;
@@ -2215,6 +2326,7 @@ struct server_context {
                 }
             }
         }
+        printf("Call update slots critical section\n");
 
         if (batch.n_tokens == 0) {
             SRV_WRN("%s", "no tokens to decode\n");
@@ -2225,6 +2337,8 @@ struct server_context {
 
         // make sure we're in the right embedding mode
         llama_set_embeddings(ctx, batch_type == 1);
+
+        printf("MARKER 1\n");
 
         // process the created batch of tokens
         for (int32_t i = 0; i < batch.n_tokens; i += n_batch) {
@@ -2242,6 +2356,7 @@ struct server_context {
 
             const int ret = llama_decode(ctx, batch_view);
             metrics.on_decoded(slots);
+            printf("MARKER 2\n");
 
             if (ret != 0) {
                 if (n_batch == 1 || ret < 0) {
@@ -2262,12 +2377,14 @@ struct server_context {
 
                 continue; // continue loop of n_batch
             }
+            printf("MARKER 3\n");
 
             for (auto & slot : slots) {
                 if (slot.i_batch < (int) i || slot.i_batch >= (int) (i + n_tokens)) {
                     continue; // continue loop of slots
                 }
 
+                printf("MARKER 4\n");
                 if (slot.state == SLOT_STATE_DONE_PROMPT) {
                     if (slot.inf_type == SERVER_TASK_INF_TYPE_EMBEDDING) {
                         // prompt evaluated for embedding
@@ -2277,6 +2394,7 @@ struct server_context {
                         continue; // continue loop of slots
                     }
 
+                printf("MARKER 5\n");
                     if (slot.inf_type == SERVER_TASK_INF_TYPE_RERANK) {
                         send_rerank(slot, batch_view);
                         slot.release();
@@ -2289,11 +2407,16 @@ struct server_context {
                 } else if (slot.state != SLOT_STATE_GENERATING) {
                     continue; // continue loop of slots
                 }
+                printf("MARKER 6\n");
+                printf("Smpl: %p\n", slot.smpl);
+                printf("I_batch, i: %d, %d\n", slot.i_batch, i);
 
                 completion_token_output result;
                 const llama_token id = common_sampler_sample(slot.smpl, ctx, slot.i_batch - i);
+                printf("MARKER 6.5\n");
 
                 common_sampler_accept(slot.smpl, id, true);
+                printf("MARKER 7\n");
 
                 slot.n_decoded += 1;
                 if (slot.n_decoded == 1) {
@@ -2306,12 +2429,14 @@ struct server_context {
 
                 const auto * cur_p = common_sampler_get_candidates(slot.smpl);
 
+                printf("MARKER 8\n");
                 for (size_t i = 0; i < (size_t) slot.sparams.n_probs; ++i) {
                     result.probs.push_back({
                         cur_p->data[i].id,
                         i >= cur_p->size ? 0.0f : cur_p->data[i].p,
                     });
                 }
+                printf("MARKER 9\n");
 
                 if (!process_token(result, slot)) {
                     // release slot because of stop condition
@@ -2320,12 +2445,14 @@ struct server_context {
                     send_final_response(slot);
                     metrics.on_prediction(slot);
                 }
+                printf("MARKER 10\n");
 
                 slot.i_batch = -1;
             }
         }
 
         SRV_DBG("%s", "run slots completed\n");
+        printf("Successfully called update slots critical section\n");
     }
 
     json model_meta() const {
