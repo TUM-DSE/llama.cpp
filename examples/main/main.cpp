@@ -87,7 +87,7 @@ int main(int argc, char ** argv) {
     common_params params;
     g_params = &params;
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_MAIN, print_usage)) {
-        return 1;
+        exit(1);
     }
 
     common_init();
@@ -104,7 +104,7 @@ int main(int argc, char ** argv) {
         LOG_ERR("%s: please use the 'perplexity' tool for perplexity calculations\n", __func__);
         LOG_ERR("************\n\n");
 
-        return 0;
+        exit(0);
     }
 
     if (params.embedding) {
@@ -112,7 +112,7 @@ int main(int argc, char ** argv) {
         LOG_ERR("%s: please use the 'embedding' tool for embedding calculations\n", __func__);
         LOG_ERR("************\n\n");
 
-        return 0;
+        exit(0);
     }
 
     if (params.n_ctx != 0 && params.n_ctx < 8) {
@@ -152,7 +152,7 @@ int main(int argc, char ** argv) {
 
     if (model == NULL) {
         LOG_ERR("%s: error: unable to load model\n", __func__);
-        return 1;
+        exit(1);
     }
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
@@ -176,7 +176,7 @@ int main(int argc, char ** argv) {
         threadpool_batch = ggml_threadpool_new_fn(&tpp_batch);
         if (!threadpool_batch) {
             LOG_ERR("%s: batch threadpool create failed : n_threads %d\n", __func__, tpp_batch.n_threads);
-            return 1;
+            exit(1);
         }
 
         // Start the non-batch threadpool in the paused state
@@ -186,7 +186,7 @@ int main(int argc, char ** argv) {
     struct ggml_threadpool * threadpool = ggml_threadpool_new_fn(&tpp);
     if (!threadpool) {
         LOG_ERR("%s: threadpool create failed : n_threads %d\n", __func__, tpp.n_threads);
-        return 1;
+        exit(1);
     }
 
     llama_attach_threadpool(ctx, threadpool, threadpool_batch);
@@ -249,7 +249,7 @@ int main(int argc, char ** argv) {
             size_t n_token_count_out = 0;
             if (!llama_state_load_file(ctx, path_session.c_str(), session_tokens.data(), session_tokens.capacity(), &n_token_count_out)) {
                 LOG_ERR("%s: failed to load session file '%s'\n", __func__, path_session.c_str());
-                return 1;
+                exit(1);
             }
             session_tokens.resize(n_token_count_out);
             LOG_INF("%s: loaded a session with prompt size of %d tokens\n", __func__, (int)session_tokens.size());
@@ -322,14 +322,14 @@ int main(int argc, char ** argv) {
             LOG_WRN("embd_inp was considered empty and bos was added: %s\n", string_from(ctx, embd_inp).c_str());
         } else {
             LOG_ERR("input is empty\n");
-            return -1;
+            exit(-1);
         }
     }
 
     // Tokenize negative prompt
     if ((int) embd_inp.size() > n_ctx - 4) {
         LOG_ERR("%s: prompt is too long (%d tokens, max %d)\n", __func__, (int) embd_inp.size(), n_ctx - 4);
-        return 1;
+        exit(1);
     }
 
     // debug message about similarity of saved session, if applicable
@@ -465,7 +465,7 @@ int main(int argc, char ** argv) {
     smpl = common_sampler_init(model, sparams);
     if (!smpl) {
         LOG_ERR("%s: failed to initialize sampling subsystem\n", __func__);
-        return 1;
+        exit(1);
     }
 
     LOG_INF("sampler seed: %u\n",     common_sampler_get_seed(smpl));
@@ -550,7 +550,7 @@ int main(int argc, char ** argv) {
 
         if (llama_encode(ctx, llama_batch_get_one(enc_input_buf, enc_input_size))) {
             LOG_ERR("%s : failed to eval\n", __func__);
-            return 1;
+            exit(1);
         }
 
         llama_token decoder_start_token_id = llama_model_decoder_start_token(model);
@@ -670,7 +670,7 @@ int main(int argc, char ** argv) {
 
                 if (llama_decode(ctx, llama_batch_get_one(&embd[i], n_eval))) {
                     LOG_ERR("%s : failed to eval\n", __func__);
-                    return 1;
+                    exit(1);
                 }
 
                 n_past += n_eval;
@@ -965,5 +965,5 @@ int main(int argc, char ** argv) {
     ggml_threadpool_free_fn(threadpool);
     ggml_threadpool_free_fn(threadpool_batch);
 
-    return 0;
+    exit(0);
 }
