@@ -2610,7 +2610,7 @@ bool ggml_is_numa(void) {
 #endif
 
 static void ggml_init_arm_arch_features(void) {
-#if defined(__linux__) && defined(__aarch64__)
+#if 0 && defined(__linux__) && defined(__aarch64__)
     uint32_t hwcap = getauxval(AT_HWCAP);
     uint32_t hwcap2 = getauxval(AT_HWCAP2);
 
