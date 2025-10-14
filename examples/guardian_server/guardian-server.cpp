@@ -1403,7 +1403,7 @@ struct server_context {
         res.error    = false;
         res.stop     = true;
         res.data     = json {
-            {"content",             !slot.params.stream ? slot.generated_text : ""},
+            //{"content",             !slot.params.stream ? slot.generated_text : ""},
             {"id_slot",             slot.id},
             {"stop",                true},
             {"model",               params.model_alias},
