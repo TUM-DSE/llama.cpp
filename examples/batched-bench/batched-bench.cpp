@@ -18,7 +18,7 @@ int main(int argc, char ** argv) {
     common_params params;
 
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_BENCH, print_usage)) {
-        return 1;
+        exit(1);
     }
 
     common_init();
@@ -42,7 +42,7 @@ int main(int argc, char ** argv) {
 
     if (model == NULL) {
         fprintf(stderr , "%s: error: unable to load model\n" , __func__);
-        return 1;
+        exit(1);
     }
 
     llama_context_params ctx_params = common_context_params_to_llama(params);
@@ -54,7 +54,7 @@ int main(int argc, char ** argv) {
 
     if (ctx == NULL) {
         fprintf(stderr , "%s: error: failed to create the llama_context\n" , __func__);
-        return 1;
+        exit(1);
     }
 
     const int32_t n_kv_max = llama_n_ctx(ctx);
@@ -96,7 +96,7 @@ int main(int argc, char ** argv) {
 
         if (!decode_helper(ctx, batch, ctx_params.n_batch)) {
             LOG_ERR("%s: llama_decode() failed\n", __func__);
-            return 1;
+            exit(1);
         }
     }
 
@@ -136,7 +136,7 @@ int main(int argc, char ** argv) {
 
                 if (!decode_helper(ctx, batch, ctx_params.n_batch)) {
                     LOG_ERR("%s: llama_decode() failed\n", __func__);
-                    return 1;
+                    exit(1);
                 }
 
                 if (is_pp_shared) {
@@ -158,7 +158,7 @@ int main(int argc, char ** argv) {
 
                     if (!decode_helper(ctx, batch, ctx_params.n_batch)) {
                         LOG_ERR("%s: llama_decode() failed\n", __func__);
-                        return 1;
+                        exit(1);
                     }
                 }
 
@@ -200,5 +200,5 @@ int main(int argc, char ** argv) {
 
     LOG("\n\n");
 
-    return 0;
+    exit(0);
 }
