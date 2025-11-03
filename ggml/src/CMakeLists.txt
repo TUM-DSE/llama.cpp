@@ -208,6 +208,12 @@ if (GGML_BACKEND_DL)
     target_compile_definitions(ggml-base PUBLIC GGML_BACKEND_DL)
 endif()
 
+if (LINUX)
+    if(GGML_THP)
+        target_compile_definitions(ggml-base PUBLIC GGML_USE_THP)
+    endif()
+endif()
+
 add_library(ggml
             ggml-backend-reg.cpp)
 

@@ -41,6 +41,9 @@ endif()
 
 option(BUILD_SHARED_LIBS "ggml: build shared libraries" ${BUILD_SHARED_LIBS_DEFAULT})
 option(GGML_BACKEND_DL   "ggml: build backends as dynamic libraries (requires BUILD_SHARED_LIBS)" OFF)
+if (LINUX)
+    option(GGML_THP   "ggml: madvise large allocated memory buffers to use (transparent) huge pages)" OFF)
+endif ()
 
 #
 # option list

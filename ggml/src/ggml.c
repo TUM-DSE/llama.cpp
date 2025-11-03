@@ -34,6 +34,7 @@
 #include <signal.h>
 #if defined(__gnu_linux__)
 #include <syscall.h>
+#include <sys/mman.h>
 #endif
 
 #if defined(__APPLE__)
@@ -241,10 +242,17 @@ void ggml_log_callback_default(enum ggml_log_level level, const char * text, voi
 
 void * ggml_aligned_malloc(size_t size) {
 #if defined(__s390x__)
-    const int alignment = 256;
+    const int alignment1 = 256;
 #else
-    const int alignment = 64;
+    const int alignment1 = 64;
 #endif
+#if defined(GGML_USE_THP)
+    // Only use THP for allocations of at least half a huge page
+    const int alignment = size >= 1 << 20 ? 1 << 21 : alignment1;
+#else
+    const int alignment = alignment1;
+#endif
+
 
 #if defined(_MSC_VER) || defined(__MINGW32__)
     return _aligned_malloc(size, alignment);
@@ -291,6 +299,11 @@ void * ggml_aligned_malloc(size_t size) {
         GGML_LOG_ERROR("%s: %s (attempted to allocate %6.2f MB)\n", __func__, error_desc, size/(1024.0*1024.0));
         return NULL;
     }
+#if defined(GGML_USE_THP)
+    if (size >= 1 << 20) {
+        madvise(aligned_memory, size, MADV_HUGEPAGE);
+    }
+#endif
     return aligned_memory;
 #endif
 }
