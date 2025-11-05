@@ -1596,6 +1596,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_NO_MMAP"));
     add_opt(common_arg(
+        {"--no-prefetch"},
+        "do not prefetch the model into memory on mapping.",
+        [](common_params & params) {
+            params.use_prefetch = false;
+        }
+    ).set_env("LLAMA_ARG_NO_PREFETCH"));
+    add_opt(common_arg(
         {"--numa"}, "TYPE",
         "attempt optimizations that help on some NUMA systems\n"
         "- distribute: spread execution evenly over all nodes\n"

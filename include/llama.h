@@ -306,6 +306,7 @@ extern "C" {
         bool vocab_only;    // only load the vocabulary, no weights
         bool use_mmap;      // use mmap if possible
         bool use_mlock;     // force system to keep model in RAM
+        bool use_prefetch;  // preftech model into memory on map
         bool check_tensors; // validate model tensor data
     };
 
