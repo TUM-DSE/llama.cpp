@@ -31,6 +31,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#define NUM_PRIOS 10
+
 using json = nlohmann::ordered_json;
 
 constexpr int HTTP_POLLING_SECONDS = 1;
@@ -188,8 +190,15 @@ struct slot_params {
 struct server_task {
     int id    = -1; // to be filled by server_queue
     int index = -1; // used when there are multiple prompts (batch request)
+    int prio      = -1;
 
     server_task_type type;
+
+    uint64_t time_deferred_us_start = 0;
+    uint64_t time_queued_us_start = 0;
+    double time_deferred_ms = 0;
+    uint64_t time_queued_start = 0;
+    double time_queued_ms = 0;
 
     // used by SERVER_TASK_TYPE_CANCEL
     int id_target = -1;
@@ -488,6 +497,8 @@ struct result_timings {
     double predicted_ms;
     double predicted_per_token_ms;
     double predicted_per_second;
+    double task_time_deferred_ms;
+    double task_time_queued_ms;
 
     // Optional speculative metrics - only included when > 0
     int32_t draft_n = 0;
@@ -504,6 +515,9 @@ struct result_timings {
             {"predicted_ms",           predicted_ms},
             {"predicted_per_token_ms", predicted_per_token_ms},
             {"predicted_per_second",   predicted_per_second},
+            {"deferred_time_ms",       task_time_deferred_ms},
+            {"queued_time_ms",         task_time_queued_ms}
+
         };
 
         if (draft_n > 0) {
@@ -1236,6 +1250,7 @@ struct server_task_result_apply_lora : server_task_result {
 struct server_slot {
     int id;
     int id_task = -1;
+    int prio    = -1;
 
     // only used for completion/embedding/infill/rerank
     server_task_type task_type = SERVER_TASK_TYPE_COMPLETION;
@@ -1307,6 +1322,10 @@ struct server_slot {
 
     double t_prompt_processing; // ms
     double t_token_generation;  // ms
+    double t_token_generation_preempted;
+
+    double task_time_deferred_ms;
+    double task_time_queued_ms;
 
     std::function<void(int)> callback_on_release;
 
@@ -1381,8 +1400,10 @@ struct server_slot {
         if (is_processing()) {
             SLT_INF(*this, "stop processing: n_past = %d, truncated = %d\n", n_past, truncated);
 
+            printf("Recording end of token generation\n");
             t_last_used = ggml_time_us();
-            t_token_generation = (ggml_time_us() - t_start_generation) / 1e3;
+            t_token_generation = t_token_generation_preempted + (ggml_time_us() - t_start_generation) / 1e3;
+            t_token_generation_preempted = 0;
             state = SLOT_STATE_IDLE;
             callback_on_release(id);
         }
@@ -1399,6 +1420,9 @@ struct server_slot {
         timings.predicted_ms = t_token_generation;
         timings.predicted_per_token_ms = t_token_generation / n_decoded;
         timings.predicted_per_second = 1e3 / t_token_generation * n_decoded;
+
+        timings.task_time_deferred_ms = task_time_deferred_ms;
+        timings.task_time_queued_ms = task_time_queued_ms;
 
         // Add speculative metrics
         if (n_draft_total > 0) {
@@ -1544,8 +1568,8 @@ struct server_queue {
     bool running;
 
     // queues
-    std::deque<server_task> queue_tasks;
-    std::deque<server_task> queue_tasks_deferred;
+    std::deque<server_task> queue_tasks[NUM_PRIOS];
+    std::deque<server_task> queue_tasks_deferred[NUM_PRIOS];
 
     std::mutex mutex_tasks;
     std::condition_variable condition_tasks;
@@ -1563,10 +1587,14 @@ struct server_queue {
             cleanup_pending_task(task.id_target);
         }
         QUE_DBG("new task, id = %d, front = %d\n", task.id, front);
+        if(task.type == SERVER_TASK_TYPE_COMPLETION) {
+            printf(">>>> Initializing task queued time for task %d (%d), priority:%d\n", task.id, task.type, task.prio);
+            task.time_queued_us_start = ggml_time_us();
+        }
         if (front) {
-            queue_tasks.push_front(std::move(task));
+            queue_tasks[task.prio].push_front(std::move(task));
         } else {
-            queue_tasks.push_back(std::move(task));
+            queue_tasks[task.prio].push_back(std::move(task));
         }
         condition_tasks.notify_one();
         return task.id;
@@ -1584,10 +1612,15 @@ struct server_queue {
                 cleanup_pending_task(task.id_target);
             }
             QUE_DBG("new task, id = %d/%d, front = %d\n", task.id, (int) tasks.size(), front);
+
+            if(task.type == SERVER_TASK_TYPE_COMPLETION) {
+                printf(">>>> Initializing task queued time for task %d (%d), priority: %d\n", task.id, task.type, task.prio);
+                task.time_queued_us_start = ggml_time_us();
+            }
             if (front) {
-                queue_tasks.push_front(std::move(task));
+                queue_tasks[task.prio].push_front(std::move(task));
             } else {
-                queue_tasks.push_back(std::move(task));
+                queue_tasks[task.prio].push_back(std::move(task));
             }
         }
         condition_tasks.notify_one();
@@ -1596,9 +1629,12 @@ struct server_queue {
 
     // Add a new task, but defer until one slot is available
     void defer(server_task task) {
+        printf("!!!!!!!! >>>>>>>>>>>>>>>>>> DEFERRING TASK with prio: %d!!!!!\n", task.prio);
         std::unique_lock<std::mutex> lock(mutex_tasks);
         QUE_DBG("defer task, id = %d\n", task.id);
-        queue_tasks_deferred.push_back(std::move(task));
+        task.time_deferred_us_start = ggml_time_us();
+        task.time_queued_ms += (ggml_time_us() - task.time_queued_us_start)/1000.0;
+        queue_tasks_deferred[task.prio].push_back(std::move(task));
         condition_tasks.notify_one();
     }
 
@@ -1622,9 +1658,16 @@ struct server_queue {
     // Call when the state of one slot is changed, it will move one task from deferred to main queue
     void pop_deferred_task() {
         std::unique_lock<std::mutex> lock(mutex_tasks);
-        if (!queue_tasks_deferred.empty()) {
-            queue_tasks.emplace_back(std::move(queue_tasks_deferred.front()));
-            queue_tasks_deferred.pop_front();
+        for(int i = 0; i < NUM_PRIOS; i++) {
+            if (!queue_tasks_deferred[i].empty()) {
+                server_task& task = queue_tasks_deferred[i].front();
+                task.time_deferred_ms += (ggml_time_us() - task.time_deferred_us_start)/1000.0;
+                printf("!!!!!!!! >>>>>>>>>>>>>>>>>> TASK %d (prio %d) has a deffered time of %f ms!!!!!\n", task.id, i, task.time_deferred_ms);
+                task.time_queued_us_start = ggml_time_us();
+                queue_tasks[i].emplace_back(std::move(queue_tasks_deferred[i].front()));
+                queue_tasks_deferred[i].pop_front();
+                break;
+            }
         }
         condition_tasks.notify_one();
     }
@@ -1650,22 +1693,32 @@ struct server_queue {
             QUE_DBG("%s", "processing new tasks\n");
 
             while (true) {
+                int top_prio = NUM_PRIOS;
                 std::unique_lock<std::mutex> lock(mutex_tasks);
                 if (!running) {
                     QUE_DBG("%s", "terminate\n");
                     return;
                 }
-                if (queue_tasks.empty()) {
-                    lock.unlock();
-                    break;
+                for(int i = 0; i < NUM_PRIOS; i++) {
+                    if (!queue_tasks[i].empty()) {
+                        top_prio = i;
+                        break;
+                    }
                 }
-                server_task task = queue_tasks.front();
-                queue_tasks.pop_front();
+                if(top_prio == NUM_PRIOS) {
+                    // All queues empty
+                    lock.unlock();
+                    goto list_empty;
+                }
+                server_task task = queue_tasks[top_prio].front();
+                queue_tasks[top_prio].pop_front();
                 lock.unlock();
 
                 QUE_DBG("processing task, id = %d\n", task.id);
                 callback_new_task(std::move(task));
             }
+            // TODO: ChecK!!: Did I close the curly brackets correctly?
+list_empty:
 
             // all tasks in the current loop is processed, slots data is now ready
             QUE_DBG("%s", "update slots\n");
@@ -1675,13 +1728,29 @@ struct server_queue {
             QUE_DBG("%s", "waiting for new tasks\n");
             {
                 std::unique_lock<std::mutex> lock(mutex_tasks);
-                if (!running) {
-                    QUE_DBG("%s", "terminate\n");
-                    return;
+                 bool all_empty = true;
+                for(int i = 0; i < NUM_PRIOS; i++) {
+                    if (!queue_tasks[i].empty()) {
+                        all_empty = false;
+                        break;
+                    }
                 }
-                if (queue_tasks.empty()) {
-                    condition_tasks.wait(lock, [&]{
-                        return (!queue_tasks.empty() || !running);
+                if (all_empty) {
+                    if (!running) {
+                        QUE_DBG("%s", "terminate\n");
+                        return;
+                    }
+                    condition_tasks.wait(lock, [&] {
+                        if (!running) {
+                            return true;
+                        }
+
+                        for (int i = 0; i < NUM_PRIOS; i++) {
+                            if (!queue_tasks[i].empty()) {
+                                return true;  // Have work to do
+                            }
+                        }
+                        return false;  // No work, keep waiting
                     });
                 }
             }
@@ -1694,12 +1763,12 @@ private:
         auto rm_func = [id_target](const server_task & task) {
             return task.id_target == id_target;
         };
-        queue_tasks.erase(
-            std::remove_if(queue_tasks.begin(),          queue_tasks.end(),          rm_func),
-            queue_tasks.end());
-        queue_tasks_deferred.erase(
-            std::remove_if(queue_tasks_deferred.begin(), queue_tasks_deferred.end(), rm_func),
-            queue_tasks_deferred.end());
+        for (int i = 0; i < NUM_PRIOS; i++) {
+            queue_tasks[i].erase(std::remove_if(queue_tasks[i].begin(), queue_tasks[i].end(), rm_func), queue_tasks[i].end());
+            queue_tasks_deferred[i].erase(std::remove_if(queue_tasks_deferred[i].begin(), queue_tasks_deferred[i].end(), rm_func),
+                                       queue_tasks_deferred[i].end());
+        }
+
     }
 };
 
@@ -1846,6 +1915,8 @@ struct server_context {
     // slots / clients
     std::vector<server_slot> slots;
     json default_generation_settings_for_props;
+
+    std::vector<server_slot> saved_slots;
 
     server_queue    queue_tasks;
     server_response queue_results;
@@ -2079,6 +2150,58 @@ struct server_context {
         return ret;
     }
 
+    server_slot * get_slot_by_preempt(const server_task & task) {
+
+
+        // find the lowest priority among the slots (highest number)
+        int lowest_prio = slots[0].prio;
+
+        for (server_slot& slot : slots) {
+            if(slot.prio > lowest_prio) {
+                lowest_prio = slot.prio;
+            }
+        }
+
+        if (task.prio >= lowest_prio) {
+            return nullptr;
+        }
+
+
+        // find the lowest prio slot that has at least n% prompt similarity
+        int lcs_len = 0;
+        float similarity = 0;
+        server_slot * ret = nullptr;
+
+        for (server_slot & slot : slots) {
+
+            if(slot.prio != lowest_prio) {
+                continue;
+            }
+
+            if(ret == nullptr) {
+                ret = &slot;
+            }
+
+            // length of the Longest Common Subsequence between the current slot's prompt and the input prompt
+            int cur_lcs_len = longest_common_subsequence(slot.cache_tokens, task.prompt_tokens);
+
+            // fraction of the common subsequence length compared to the current slot's prompt length
+            float cur_similarity = static_cast<int>(slot.cache_tokens.size()) != 0 ? static_cast<float>(cur_lcs_len) / static_cast<int>(slot.cache_tokens.size()) : 0;
+
+            // select the current slot if the criteria match
+            if (cur_lcs_len > lcs_len && cur_similarity > slot_prompt_similarity) {
+                lcs_len = cur_lcs_len;
+                similarity = cur_similarity;
+                ret = &slot;
+            }
+        }
+
+        return ret;
+    }
+
+
+
+
     bool can_be_detokenized(const struct llama_context * ctx, const std::vector<llama_token> & tokens) {
         const llama_model * model = llama_get_model(ctx);
         const llama_vocab * vocab = llama_model_get_vocab(model);
@@ -2094,10 +2217,16 @@ struct server_context {
     bool launch_slot_with_task(server_slot & slot, const server_task & task) {
         slot.reset();
         slot.id_task       = task.id;
+        slot.task_time_deferred_ms = task.time_deferred_ms;
+        slot.task_time_queued_ms   = task.time_queued_ms;
+        printf(">>>>>>>>>>>>>>>>>>>>>> SELECTED TASK %d has existing deferred time of %f and queued time %f\n", task.id,
+               task.time_deferred_ms, task.time_queued_ms);
         slot.index         = task.index;
         slot.task_type     = task.type;
         slot.params        = std::move(task.params);
         slot.prompt_tokens = std::move(task.prompt_tokens);
+        slot.prio    = task.prio;
+
 
         if (!are_lora_equal(task.params.lora, slot.lora)) {
             // if lora is changed, we cannot reuse cached tokens
@@ -2583,6 +2712,7 @@ struct server_context {
             const std::function<bool(server_task_result_ptr&)> & result_handler,
             const std::function<void(json)> & error_handler,
             const std::function<bool()> & is_connection_closed) {
+        printf("In receive_cmpl_results_stream\n");
         size_t n_finished = 0;
         while (true) {
             server_task_result_ptr result = queue_results.recv_with_timeout(id_tasks, HTTP_POLLING_SECONDS);
@@ -2633,6 +2763,22 @@ struct server_context {
                     const int id_slot = task.id_selected_slot;
 
                     server_slot * slot = id_slot != -1 ? get_slot_by_id(id_slot) : get_available_slot(task);
+                    if (slot == nullptr) {
+                        // Try to preempt a task
+                        slot = get_slot_by_preempt(task);
+
+                        if(slot != nullptr) {
+                            printf(">>>>>>>>>>>>> CAN DO PREEMPTION\n");
+                            // save slot
+                            // TODO: Check if this is a deep or shallow copy
+                            server_slot temp_slot = *slot;
+                            temp_slot.t_token_generation_preempted += ((ggml_time_us() - temp_slot.t_start_generation) / 1e3);
+                            //common_sampler_free(temp_slot.smpl);
+                            saved_slots.push_back(temp_slot);
+                            //slot.release();
+                            slot->state = SLOT_STATE_IDLE;
+                        }
+                    }
 
                     if (slot == nullptr) {
                         // if no slot is available, we defer this task for processing later
@@ -2691,7 +2837,7 @@ struct server_context {
                     res->slots_data          = std::move(slots_data);
                     res->n_idle_slots        = n_idle_slots;
                     res->n_processing_slots  = n_processing_slots;
-                    res->n_tasks_deferred    = queue_tasks.queue_tasks_deferred.size();
+                    //res->n_tasks_deferred    = queue_tasks.queue_tasks_deferred.size();
                     res->t_start             = metrics.t_start;
 
                     res->kv_cache_tokens_count = llama_kv_self_n_tokens(ctx);
@@ -2831,6 +2977,43 @@ struct server_context {
     }
 
     void update_slots() {
+        int can_restore_preempt = true;
+
+        while(can_restore_preempt) {
+            can_restore_preempt = false;
+            if(saved_slots.size() == 0) {
+                break;
+            }
+            // find highest priority saved slot (lowest number)
+            int highest_prio = saved_slots[0].prio;
+            size_t highest_prio_pos = 0;
+
+            for(size_t i = 1; i < saved_slots.size(); i++) {
+                if(saved_slots[i].prio < highest_prio) {
+                    highest_prio = saved_slots[i].prio;
+                    highest_prio_pos = i;
+                }
+            }
+
+            for(server_slot& slot: slots) {
+                if(!slot.is_processing()) {
+                    can_restore_preempt = true;
+                    // TODO: Check if deep or shallow copy
+                    slot = saved_slots[highest_prio_pos];
+                    slot.t_start_generation = ggml_time_us();
+                    printf("Updateing smpl\n");
+                    slot.smpl = common_sampler_init(model, slot.params.sampling);
+                    printf("Updated smpl\n");
+                    if(slot.smpl == nullptr) {
+                        printf("SMPL IS NULL !!!!!!!!!!!!\n");
+                    }
+                    saved_slots.erase(saved_slots.begin() + highest_prio_pos);
+                    break;
+                }
+            }
+
+        }
+
         // check if all slots are idle
         {
             bool all_idle = true;
@@ -3168,6 +3351,7 @@ struct server_context {
                 }
             }
         }
+        printf("Call update slots critical section\n");
 
         if (batch.n_tokens == 0) {
             SRV_WRN("%s", "no tokens to decode\n");
@@ -3182,6 +3366,8 @@ struct server_context {
             // apply lora, only need to do it once per batch
             common_set_adapter_lora(ctx, slot_batched->lora);
         }
+
+        printf("MARKER 1\n");
 
         // process the created batch of tokens
         for (int32_t i = 0; i < batch.n_tokens; i += n_batch) {
@@ -3199,6 +3385,7 @@ struct server_context {
 
             const int ret = llama_decode(ctx, batch_view);
             metrics.on_decoded(slots);
+            printf("MARKER 2\n");
 
             if (ret != 0) {
                 if (n_batch == 1 || ret < 0) {
@@ -3219,12 +3406,14 @@ struct server_context {
 
                 continue; // continue loop of n_batch
             }
+            printf("MARKER 3\n");
 
             for (auto & slot : slots) {
                 if (slot.i_batch < (int) i || slot.i_batch >= (int) (i + n_tokens)) {
                     continue; // continue loop of slots
                 }
 
+                printf("MARKER 4\n");
                 if (slot.state == SLOT_STATE_DONE_PROMPT) {
                     if (slot.task_type == SERVER_TASK_TYPE_EMBEDDING) {
                         // prompt evaluated for embedding
@@ -3234,6 +3423,7 @@ struct server_context {
                         continue; // continue loop of slots
                     }
 
+                printf("MARKER 5\n");
                     if (slot.task_type == SERVER_TASK_TYPE_RERANK) {
                         send_rerank(slot, batch_view);
                         slot.release();
@@ -3246,14 +3436,19 @@ struct server_context {
                 } else if (slot.state != SLOT_STATE_GENERATING) {
                     continue; // continue loop of slots
                 }
+                printf("MARKER 6\n");
+                printf("Smpl: %p\n", slot.smpl);
+                printf("I_batch, i: %d, %d\n", slot.i_batch, i);
 
                 const int tok_idx = slot.i_batch - i;
 
                 llama_token id = common_sampler_sample(slot.smpl, ctx, tok_idx);
+                printf("MARKER 6.5\n");
 
                 slot.i_batch = -1;
 
                 common_sampler_accept(slot.smpl, id, true);
+                printf("MARKER 7\n");
 
                 slot.n_decoded += 1;
 
@@ -3272,9 +3467,11 @@ struct server_context {
                 result.text_to_send = common_token_to_piece(ctx, result.tok, accept_special_token(slot, result.tok));
                 result.prob         = 1.0f; // TODO: set it here instead of doing inside populate_token_probs
 
+                printf("MARKER 8\n");
                 if (slot.params.sampling.n_probs > 0) {
                     populate_token_probs(slot, result, slot.params.post_sampling_probs, params_base.special, tok_idx);
                 }
+                printf("MARKER 9\n");
 
                 if (!process_token(result, slot)) {
                     // release slot because of stop condition
@@ -3282,8 +3479,9 @@ struct server_context {
                     slot.print_timings();
                     send_final_response(slot);
                     metrics.on_prediction(slot);
-                    continue;
                 }
+                printf("MARKER 10\n");
+
             }
 
             // do speculative decoding
@@ -3384,6 +3582,7 @@ struct server_context {
         }
 
         SRV_DBG("%s", "run slots completed\n");
+        printf("Successfully called update slots critical section\n");
     }
 
     json model_meta() const {
@@ -3935,6 +4134,8 @@ int main(int argc, char ** argv) {
                 task.params.oaicompat                 = oaicompat;
                 task.params.oaicompat_cmpl_id         = completion_id;
                 // oaicompat_model is already populated by params_from_json_cmpl
+
+                task.prio = json_value(data, "prio", 0);
 
                 tasks.push_back(task);
             }
