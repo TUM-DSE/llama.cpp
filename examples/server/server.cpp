@@ -1322,7 +1322,8 @@ struct server_slot {
 
     double t_prompt_processing; // ms
     double t_token_generation;  // ms
-    double t_token_generation_preempted;
+    double   t_token_generation_preempted;
+    int64_t  t_preempted_us = 0; // wall-clock timestamp when slot was saved to saved_slots
 
     double task_time_deferred_ms;
     double task_time_queued_ms;
@@ -1400,7 +1401,6 @@ struct server_slot {
         if (is_processing()) {
             SLT_INF(*this, "stop processing: n_past = %d, truncated = %d\n", n_past, truncated);
 
-            printf("Recording end of token generation\n");
             t_last_used = ggml_time_us();
             t_token_generation = t_token_generation_preempted + (ggml_time_us() - t_start_generation) / 1e3;
             t_token_generation_preempted = 0;
@@ -1591,10 +1591,11 @@ struct server_queue {
             printf(">>>> Initializing task queued time for task %d (%d), priority:%d\n", task.id, task.type, task.prio);
             task.time_queued_us_start = ggml_time_us();
         }
+        int prio = (task.prio >= 0 && task.prio < NUM_PRIOS) ? task.prio : 0;
         if (front) {
-            queue_tasks[task.prio].push_front(std::move(task));
+            queue_tasks[prio].push_front(std::move(task));
         } else {
-            queue_tasks[task.prio].push_back(std::move(task));
+            queue_tasks[prio].push_back(std::move(task));
         }
         condition_tasks.notify_one();
         return task.id;
@@ -1617,10 +1618,11 @@ struct server_queue {
                 printf(">>>> Initializing task queued time for task %d (%d), priority: %d\n", task.id, task.type, task.prio);
                 task.time_queued_us_start = ggml_time_us();
             }
+            int prio = (task.prio >= 0 && task.prio < NUM_PRIOS) ? task.prio : 0;
             if (front) {
-                queue_tasks[task.prio].push_front(std::move(task));
+                queue_tasks[prio].push_front(std::move(task));
             } else {
-                queue_tasks[task.prio].push_back(std::move(task));
+                queue_tasks[prio].push_back(std::move(task));
             }
         }
         condition_tasks.notify_one();
@@ -1634,7 +1636,8 @@ struct server_queue {
         QUE_DBG("defer task, id = %d\n", task.id);
         task.time_deferred_us_start = ggml_time_us();
         task.time_queued_ms += (ggml_time_us() - task.time_queued_us_start)/1000.0;
-        queue_tasks_deferred[task.prio].push_back(std::move(task));
+        int prio = (task.prio >= 0 && task.prio < NUM_PRIOS) ? task.prio : 0;
+        queue_tasks_deferred[prio].push_back(std::move(task));
         condition_tasks.notify_one();
     }
 
@@ -1712,6 +1715,7 @@ struct server_queue {
                 }
                 server_task task = queue_tasks[top_prio].front();
                 queue_tasks[top_prio].pop_front();
+                task.time_queued_ms += (ggml_time_us() - task.time_queued_us_start) / 1000.0;
                 lock.unlock();
 
                 QUE_DBG("processing task, id = %d\n", task.id);
@@ -2712,7 +2716,6 @@ struct server_context {
             const std::function<bool(server_task_result_ptr&)> & result_handler,
             const std::function<void(json)> & error_handler,
             const std::function<bool()> & is_connection_closed) {
-        printf("In receive_cmpl_results_stream\n");
         size_t n_finished = 0;
         while (true) {
             server_task_result_ptr result = queue_results.recv_with_timeout(id_tasks, HTTP_POLLING_SECONDS);
@@ -2773,6 +2776,7 @@ struct server_context {
                             // TODO: Check if this is a deep or shallow copy
                             server_slot temp_slot = *slot;
                             temp_slot.t_token_generation_preempted += ((ggml_time_us() - temp_slot.t_start_generation) / 1e3);
+                            temp_slot.t_preempted_us = ggml_time_us();
                             //common_sampler_free(temp_slot.smpl);
                             saved_slots.push_back(temp_slot);
                             //slot.release();
@@ -2977,6 +2981,7 @@ struct server_context {
     }
 
     void update_slots() {
+        fprintf(stderr, "[DBG] update_slots: enter\n");
         int can_restore_preempt = true;
 
         while(can_restore_preempt) {
@@ -3000,12 +3005,10 @@ struct server_context {
                     can_restore_preempt = true;
                     // TODO: Check if deep or shallow copy
                     slot = saved_slots[highest_prio_pos];
+                    slot.task_time_deferred_ms += (ggml_time_us() - slot.t_preempted_us) / 1000.0;
                     slot.t_start_generation = ggml_time_us();
-                    printf("Updateing smpl\n");
                     slot.smpl = common_sampler_init(model, slot.params.sampling);
-                    printf("Updated smpl\n");
                     if(slot.smpl == nullptr) {
-                        printf("SMPL IS NULL !!!!!!!!!!!!\n");
                     }
                     saved_slots.erase(saved_slots.begin() + highest_prio_pos);
                     break;
@@ -3351,7 +3354,6 @@ struct server_context {
                 }
             }
         }
-        printf("Call update slots critical section\n");
 
         if (batch.n_tokens == 0) {
             SRV_WRN("%s", "no tokens to decode\n");
@@ -3367,7 +3369,6 @@ struct server_context {
             common_set_adapter_lora(ctx, slot_batched->lora);
         }
 
-        printf("MARKER 1\n");
 
         // process the created batch of tokens
         for (int32_t i = 0; i < batch.n_tokens; i += n_batch) {
@@ -3383,9 +3384,10 @@ struct server_context {
                 batch.logits   + i,
             };
 
+            fprintf(stderr, "[DBG] update_slots: llama_decode n_tokens=%d i=%d\n", n_tokens, i);
             const int ret = llama_decode(ctx, batch_view);
+            fprintf(stderr, "[DBG] update_slots: llama_decode returned ret=%d\n", ret);
             metrics.on_decoded(slots);
-            printf("MARKER 2\n");
 
             if (ret != 0) {
                 if (n_batch == 1 || ret < 0) {
@@ -3406,14 +3408,12 @@ struct server_context {
 
                 continue; // continue loop of n_batch
             }
-            printf("MARKER 3\n");
 
             for (auto & slot : slots) {
                 if (slot.i_batch < (int) i || slot.i_batch >= (int) (i + n_tokens)) {
                     continue; // continue loop of slots
                 }
 
-                printf("MARKER 4\n");
                 if (slot.state == SLOT_STATE_DONE_PROMPT) {
                     if (slot.task_type == SERVER_TASK_TYPE_EMBEDDING) {
                         // prompt evaluated for embedding
@@ -3423,7 +3423,6 @@ struct server_context {
                         continue; // continue loop of slots
                     }
 
-                printf("MARKER 5\n");
                     if (slot.task_type == SERVER_TASK_TYPE_RERANK) {
                         send_rerank(slot, batch_view);
                         slot.release();
@@ -3432,23 +3431,21 @@ struct server_context {
                     }
 
                     // prompt evaluated for next-token prediction
+                    fprintf(stderr, "[DBG] update_slots: slot %d transitioning to GENERATING\n", slot.id);
                     slot.state = SLOT_STATE_GENERATING;
                 } else if (slot.state != SLOT_STATE_GENERATING) {
                     continue; // continue loop of slots
                 }
-                printf("MARKER 6\n");
-                printf("Smpl: %p\n", slot.smpl);
-                printf("I_batch, i: %d, %d\n", slot.i_batch, i);
 
                 const int tok_idx = slot.i_batch - i;
 
+                fprintf(stderr, "[DBG] update_slots: sampling slot %d tok_idx=%d n_decoded=%d\n", slot.id, tok_idx, slot.n_decoded);
                 llama_token id = common_sampler_sample(slot.smpl, ctx, tok_idx);
-                printf("MARKER 6.5\n");
+                fprintf(stderr, "[DBG] update_slots: sampled token id=%d\n", id);
 
                 slot.i_batch = -1;
 
                 common_sampler_accept(slot.smpl, id, true);
-                printf("MARKER 7\n");
 
                 slot.n_decoded += 1;
 
@@ -3467,11 +3464,9 @@ struct server_context {
                 result.text_to_send = common_token_to_piece(ctx, result.tok, accept_special_token(slot, result.tok));
                 result.prob         = 1.0f; // TODO: set it here instead of doing inside populate_token_probs
 
-                printf("MARKER 8\n");
                 if (slot.params.sampling.n_probs > 0) {
                     populate_token_probs(slot, result, slot.params.post_sampling_probs, params_base.special, tok_idx);
                 }
-                printf("MARKER 9\n");
 
                 if (!process_token(result, slot)) {
                     // release slot because of stop condition
@@ -3480,7 +3475,6 @@ struct server_context {
                     send_final_response(slot);
                     metrics.on_prediction(slot);
                 }
-                printf("MARKER 10\n");
 
             }
 
@@ -3582,7 +3576,6 @@ struct server_context {
         }
 
         SRV_DBG("%s", "run slots completed\n");
-        printf("Successfully called update slots critical section\n");
     }
 
     json model_meta() const {
@@ -4144,8 +4137,10 @@ int main(int argc, char ** argv) {
             return;
         }
 
+        fprintf(stderr, "[DBG] handle_completions_impl: posting %zu tasks\n", tasks.size());
         ctx_server.queue_results.add_waiting_tasks(tasks);
         ctx_server.queue_tasks.post(tasks);
+        fprintf(stderr, "[DBG] handle_completions_impl: tasks posted, waiting for results\n");
 
         bool stream = json_value(data, "stream", false);
         const auto task_ids = server_task::get_list_id(tasks);
@@ -4206,7 +4201,9 @@ int main(int argc, char ** argv) {
     };
 
     const auto handle_completions = [&handle_completions_impl](const httplib::Request & req, httplib::Response & res) {
+        fprintf(stderr, "[DBG] handle_completions: request received, body len=%zu\n", req.body.size());
         json data = json::parse(req.body);
+        fprintf(stderr, "[DBG] handle_completions: JSON parsed\n");
         return handle_completions_impl(
             SERVER_TASK_TYPE_COMPLETION,
             data,

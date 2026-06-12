@@ -10,6 +10,7 @@
 #include "ggml-backend.h"
 // Ensure the correct path to ggml-backend-impl.h is provided
 #include "../ggml/src/ggml-backend-impl.h" // Adjust the path as needed
+#include "ggml-cpu.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -55,6 +56,8 @@ bool llama_supports_rpc(void) {
     return ggml_backend_reg_by_name("RPC") != nullptr;
 }
 
+const char * llama_print_system_info(void);
+
 void llama_backend_init(void) {
     ggml_time_init();
 
@@ -64,6 +67,10 @@ void llama_backend_init(void) {
         struct ggml_context * ctx = ggml_init(params);
         ggml_free(ctx);
     }
+
+    printf("CPU features: NEON=%d ARM_FMA=%d FP16_VA=%d DOTPROD=%d MATMUL_INT8=%d SVE=%d SME=%d\n",
+        ggml_cpu_has_neon(), ggml_cpu_has_arm_fma(), ggml_cpu_has_fp16_va(),
+        ggml_cpu_has_dotprod(), ggml_cpu_has_matmul_int8(), ggml_cpu_has_sve(), ggml_cpu_has_sme());
 }
 
 void llama_numa_init(enum ggml_numa_strategy numa) {
