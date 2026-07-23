@@ -100,17 +100,12 @@
         "cacheVariables": {
             "CMAKE_BUILD_TYPE": "Release",
             "CMAKE_BUILD_RPATH_USE_ORIGIN": "ON",
-            "GGML_CUDA": "OFF"
-        }
-    },
-
-    {
-        "name": "cpu",
-        "inherits": "base1",
-        "cacheVariables": {
+            "GGML_CUDA": "OFF",
             "GGML_CPU_ARM_ARCH": "armv8.2-a+dotprod+fp16"
         }
     },
+
+    { "name": "cpu", "inherits": "base1" },
 
     {
         "name": "cpu-novec",
