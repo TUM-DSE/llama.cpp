@@ -92,6 +92,55 @@
     { "name": "x64-windows-sycl-release-f16", "inherits": [ "sycl-base", "release", "sycl_f16" ] },
 
     { "name": "x64-windows-vulkan-debug", "inherits": [ "base", "vulkan", "debug" ] },
-    { "name": "x64-windows-vulkan-release", "inherits": [ "base", "vulkan", "release" ] }
+    { "name": "x64-windows-vulkan-release", "inherits": [ "base", "vulkan", "release" ] },
+
+    {
+        "name": "base1", "hidden": true,
+        "binaryDir": "${sourceDir}/build-${presetName}",
+        "cacheVariables": {
+            "CMAKE_BUILD_TYPE": "Release",
+            "CMAKE_BUILD_RPATH_USE_ORIGIN": "ON",
+            "GGML_CUDA": "OFF"
+        }
+    },
+
+    {
+        "name": "cpu",
+        "inherits": "base1",
+        "cacheVariables": {
+            "GGML_CPU_ARM_ARCH": "armv8.2-a+dotprod+fp16"
+        }
+    },
+
+    {
+        "name": "cpu-novec",
+        "inherits": "base1",
+        "cacheVariables": {
+            "GGML_LLAMAFILE": "OFF"
+        }
+    },
+
+    {
+        "name": "cpu-thp",
+        "inherits": "base1",
+        "cacheVariables": {
+            "GGML_THP": "ON"
+        }
+    },
+
+    {
+        "name": "cuda",
+        "inherits": "base1",
+        "cacheVariables": {
+            "GGML_CUDA": "ON"
+        }
+    }
+  ],
+
+  "buildPresets": [
+    { "name": "cpu", "configurePreset": "cpu" },
+    { "name": "cpu-novec", "configurePreset": "cpu-novec" },
+    { "name": "cpu-thp", "configurePreset": "cpu-thp" },
+    { "name": "cuda", "configurePreset": "cuda" }
   ]
 }
