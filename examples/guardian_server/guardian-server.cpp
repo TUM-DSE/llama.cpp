@@ -674,7 +674,7 @@ struct server_response {
         //printf("Json: %s\n", result.data.dump().c_str());
         printf(">>>>> SHM ID: %d\n", result.shm_id);
         SharedMemory* shm = (SharedMemory*)comm.requestQueue;
-        strcpy(shm->requests[result.shm_id].text, result.data.dump().c_str());
+        strcpy(shm->requests[result.shm_id].text, result.data.dump(-1, ' ', false, json::error_handler_t::replace).c_str());
 
 
         std::unique_lock<std::mutex> lock(mutex_results);

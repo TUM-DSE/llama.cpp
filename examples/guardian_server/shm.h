@@ -6,9 +6,9 @@
 #include <string>
 
 #define SHM_LOCATION "/dev/shm/guardian_shm"
-#define SHM_SIZE (32 * 1024 * 1024)
+#define SHM_SIZE (32 * 1024 * 1024 )
 #define MAX_REQUESTS 512
-#define MAX_TEXT 8196
+#define MAX_TEXT 8 * 1024 * 1024
 #define NB_PRIORITIES 3
 #define SHM_NAME "Guardian_shm"
 #define BENCHMARK_PORT 0xf4
