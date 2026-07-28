@@ -149,9 +149,22 @@ int main(int argc, char ** argv) {
     }
 
     routes.update_meta(ctx_server);
-    ctx_http.is_ready.store(true);
     SRV_INF("%s", "model loaded\n");
 
+    // The shm front-end must be serving BEFORE readiness is advertised.
+    // init() calls init_shm(create=true), which memsets the whole ~4.3 GB
+    // region and re-runs sem_init()/pthread_mutex_init() on all 512 slots. A
+    // client that connected and posted before that point loses its request
+    // without a trace: the text is zeroed, serverNotifier is reset so no
+    // scanner can ever find it, clientNotifier is reset so the caller blocks
+    // forever, and the slot mutex is unlocked so the slot is handed straight
+    // to somebody else.
+    //
+    // /health is what the benchmark driver waits on before it starts
+    // submitting, so setting is_ready before this point silently ate the first
+    // requests of every run — measured as 2 of 100 on 2026-07-27, and the
+    // likely cause of the original 99/100 stall. See
+    // tests/golden/deviations.md.
     if (!shm_frontend.init()) {
         clean_up();
         if (ctx_http.thread.joinable()) {
@@ -161,6 +174,8 @@ int main(int argc, char ** argv) {
         return 1;
     }
     shm_frontend.start(ctx_server, params);
+
+    ctx_http.is_ready.store(true);
 
     shutdown_handler = [&](int) {
         // unblocks start_loop()
