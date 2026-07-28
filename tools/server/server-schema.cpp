@@ -47,6 +47,10 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->add_alias("max_tokens")
         ->set_desc("Set the maximum number of tokens to predict. When 0, no tokens will be generated but the prompt is evaluated into the cache"));
 
+    add((new field_num("outb_id", params.outb_id))
+        ->set_hard_limits(-1, INT32_MAX)
+        ->set_desc("Guardian benchmark request id. When set, the server writes trace events 201 (request handled) and 202 (response posted) to I/O port 0xf4, tagged with this id"));
+
     add((new field_num("n_indent", params.n_indent))
         ->set_hard_limits(0, INT32_MAX)
         ->set_desc("Specify the minimum line indentation for the generated text in number of whitespace characters. Useful for code completion tasks"));

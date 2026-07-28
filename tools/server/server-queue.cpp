@@ -1,4 +1,5 @@
 #include "server-task.h"
+#include "guardian-instr.h"
 #include "server-queue.h"
 
 #include "log.h"
@@ -324,7 +325,15 @@ void server_response::send(server_task_result_ptr && result) {
         if (result->id == id_task) {
             RES_DBG("task id = %d pushed to result queue\n", result->id);
 
+            // Guardian TTFT event 202: the response is queued and the HTTP
+            // thread is about to be woken. Read before the move, written
+            // between the push and the notify — the exact boundary the legacy
+            // fork used (8d7a5affe), and the closest HTTP analogue to the shm
+            // server's 202, which fires just before its sem_post().
+            const int trace_id = result->outb_id;
+
             queue_results.emplace_back(std::move(result));
+            guardian_port_event(trace_id, GUARDIAN_EVENT_ENGINE_SEND);
             condition_results.notify_all();
             return;
         }

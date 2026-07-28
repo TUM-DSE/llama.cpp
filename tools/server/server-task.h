@@ -62,6 +62,11 @@ struct task_params {
     int32_t n_indent  =  0; // minimum line indentation for the generated text in number of whitespace characters
     int32_t n_cmpl    =  1; // number of completions to generate from this prompt
 
+    // Guardian TTFT instrumentation: request id echoed to I/O port 0xf4 so the
+    // host trace can pair engine-side events 201/202 with the agent's 200/203.
+    // -1 (the default) means the caller did not ask to be traced.
+    int32_t outb_id   = -1;
+
     int32_t n_cache_reuse = 0; // min chunk size to attempt reusing from the cache via KV shifting (0 = disabled)
 
     int64_t t_max_prompt_ms  = -1; // TODO: implement
@@ -174,6 +179,11 @@ struct server_task {
 
     // used by SERVER_TASK_TYPE_SET_LORA
     std::map<int, float> set_lora; // mapping adapter ID -> scale
+
+    // Guardian TTFT: set once event 201 has been written for this task. A task
+    // that finds no free slot is deferred and processed again, and the legacy
+    // measurement is the *first* time the engine took the request.
+    bool outb_sent = false;
 
     server_task() = default;
 
@@ -291,6 +301,12 @@ struct result_prompt_progress {
 struct server_task_result {
     int id           = -1;
     int id_slot      = -1;
+
+    // Guardian TTFT trace id, copied from the task that produced this result;
+    // -1 for results nobody asked to trace. Carried on the result because
+    // event 202 is written in server_response::send(), which sees results
+    // rather than tasks — the same place the legacy fork wrote it.
+    int32_t outb_id  = -1;
 
     // TODO @ngxson : remove this field and implement a mapping task_id -> idx in the response_reader
     size_t index = 0; // to be used for batched tasks

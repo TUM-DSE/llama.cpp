@@ -1,4 +1,5 @@
 #include "server-context.h"
+#include "guardian-instr.h"
 #include "server-chat.h"
 #include "server-common.h"
 #include "server-http.h"
@@ -2076,6 +2077,11 @@ private:
 
         res->id      = slot.task->id;
         res->id_slot = slot.id;
+        // Guardian TTFT: the trace id rides along so event 202 can be written
+        // where the waiting HTTP thread is woken, not here — response
+        // preparation (detokenizing, copying params) happens in between and
+        // the legacy measurement excluded it.
+        res->outb_id = slot.task->params.outb_id;
 
         res->index = slot.task->index;
 
@@ -2356,6 +2362,18 @@ private:
                     }
 
                     const int id_task = task.id;
+
+                    // Guardian TTFT event 201: the engine has taken the
+                    // request. Before slot selection, matching the legacy fork
+                    // (8d7a5affe emitted it at the top of this case), so that
+                    // `201 - 200` stays pure transport and does not absorb slot
+                    // scheduling. Once per task: a deferred task comes back
+                    // through here.
+                    if (!task.outb_sent) {
+                        task.outb_sent = true;
+                        guardian_port_event(task.params.outb_id,
+                                            GUARDIAN_EVENT_ENGINE_RECV);
+                    }
 
                     server_slot * slot = get_available_slot(task);
 

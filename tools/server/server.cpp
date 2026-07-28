@@ -1,4 +1,5 @@
 #include "server-context.h"
+#include "guardian-instr.h"
 #include "server-http.h"
 #include "server-models.h"
 #include "server-cors-proxy.h"
@@ -467,6 +468,12 @@ int llama_server(common_params & params, int argc, char ** argv) {
     }
 
     SRV_INF("listening on %s\n", ctx_http.listening_address.c_str());
+    // A benchmark can grep this to tell an instrumented binary from a
+    // stock one before spending a hardware run on it. Absent when the
+    // build has no port support or the process lacks CAP_SYS_RAWIO.
+    if (guardian_instr_ready()) {
+        SRV_INF("%s\n", GUARDIAN_INSTR_MARKER);
+    }
 
     if (is_router_server) {
         if (!params.models_preset_hf.empty()) {

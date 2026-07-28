@@ -7,6 +7,8 @@
 
 #include "guardian-shm.h"
 
+#include <sys/io.h>
+
 #include "server-context.h"
 #include "server-http.h"
 
@@ -192,6 +194,11 @@ int main(int argc, char ** argv) {
 #endif
 
     SRV_INF("guardian-server listening on %s + guardian shm\n", ctx_http.listening_address.c_str());
+    // same marker the HTTP server prints, so a benchmark preflight can
+    // check either transport with one grep
+    if (ioperm(0xf4, 4, 1) == 0) {
+        SRV_INF("%s\n", "guardian: TTFT port instrumentation active");
+    }
 
     // blocks until terminate()
     ctx_server.start_loop();
