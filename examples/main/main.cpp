@@ -861,6 +861,13 @@ int main(int argc, char ** argv) {
                     buffer += line;
                 } while (another_line);
 
+                // EOF on stdin (e.g. Ctrl+D): end the session
+                if (buffer.empty() && std::cin.eof()) {
+                    LOG("\n");
+                    console::set_display(console::reset);
+                    break;
+                }
+
                 // done taking input, reset color
                 console::set_display(console::reset);
                 display = true;
