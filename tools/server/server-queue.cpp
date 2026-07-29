@@ -17,6 +17,37 @@
 #define RES_DBG(fmt, ...) LOG_DBG("res  %12.*s: " fmt, 12, __func__, __VA_ARGS__)
 
 //
+// Guardian: pre-prefill wall clock. The state machine and the reasoning behind
+// it are in guardian-queue-timing.h; these wrappers only supply the clock and
+// restrict it to the task types that can occupy a slot.
+//
+static void guardian_open_queued(server_task & task) {
+    if (task.needs_slot()) {
+        task.guardian_clock.open_queued(ggml_time_us());
+    }
+}
+
+static void guardian_bank_queued(server_task & task) {
+    if (task.needs_slot()) {
+        task.guardian_clock.bank_queued(ggml_time_us());
+    }
+}
+
+static void guardian_defer(server_task & task) {
+    if (task.needs_slot()) {
+        task.guardian_clock.defer(ggml_time_us());
+    }
+}
+
+// coming back from the deferred queue: bank the deferred time, reopen the
+// ready-queue clock
+static void guardian_undefer(server_task & task) {
+    if (task.needs_slot()) {
+        task.guardian_clock.undefer(ggml_time_us());
+    }
+}
+
+//
 // server_queue
 //
 
@@ -29,6 +60,7 @@ int server_queue::post(server_task && task, bool front) {
     }
     const int task_id = task.id;
     QUE_DBG("new task, id = %d, front = %d\n", task_id, front);
+    guardian_open_queued(task);
     if (front) {
         queue_tasks.push_front(std::move(task));
     } else {
@@ -50,6 +82,7 @@ int server_queue::post(std::vector<server_task> && tasks, bool front) {
             cleanup_pending_task(task.id_target);
         }
         QUE_DBG("new task, id = %d/%d, front = %d\n", task.id, (int) tasks.size(), front);
+        guardian_open_queued(task);
         if (front) {
             queue_tasks.push_front(std::move(task));
         } else {
@@ -64,6 +97,7 @@ int server_queue::post(std::vector<server_task> && tasks, bool front) {
 void server_queue::defer(server_task && task) {
     std::unique_lock<std::mutex> lock(mutex_tasks);
     QUE_DBG("defer task, id = %d\n", task.id);
+    guardian_defer(task);
     queue_tasks_deferred.push_back(std::move(task));
     time_last_task = ggml_time_ms();
     condition_tasks.notify_one();
@@ -83,6 +117,7 @@ void server_queue::pop_deferred_task(int id_slot) {
         for (auto it = queue_tasks_deferred.begin(); it != queue_tasks_deferred.end(); ++it) {
             if (it->id_slot == id_slot) {
                 QUE_DBG("pop deferred task (use slot %d), id_task = %d\n", id_slot, it->id);
+                guardian_undefer(*it);
                 queue_tasks.emplace_front(std::move(*it));
                 queue_tasks_deferred.erase(it);
                 found = true;
@@ -92,6 +127,7 @@ void server_queue::pop_deferred_task(int id_slot) {
         // if not tasks found using the slot, just pop the first deferred task (default behavior)
         if (!found) {
             QUE_DBG("pop deferred task, id_task = %d\n", queue_tasks_deferred.front().id);
+            guardian_undefer(queue_tasks_deferred.front());
             queue_tasks.emplace_front(std::move(queue_tasks_deferred.front()));
             queue_tasks_deferred.pop_front();
         }
@@ -152,6 +188,10 @@ void server_queue::start_loop(int64_t idle_sleep_ms) {
             }
             server_task task = std::move(queue_tasks.front());
             queue_tasks.pop_front();
+            // leaving the ready queue: bank the wait. If no slot turns out to
+            // be free, defer() sees an already-closed clock and opens the
+            // deferred one instead of counting this interval twice.
+            guardian_bank_queued(task);
             lock.unlock();
 
             QUE_DBG("processing task, id = %d\n", task.id);

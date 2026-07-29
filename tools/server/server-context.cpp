@@ -517,6 +517,14 @@ struct server_slot {
             timings.draft_n_accepted = n_draft_accepted;
         }
 
+        // Guardian: read straight off the task the slot is running. The legacy
+        // fork copied these into the slot at launch; here the slot already owns
+        // the task, so there is nothing to keep in sync.
+        if (task) {
+            timings.queued_time_ms   = task->guardian_clock.queued_ms;
+            timings.deferred_time_ms = task->guardian_clock.deferred_ms;
+        }
+
         return timings;
     }
 
@@ -2363,18 +2371,6 @@ private:
 
                     const int id_task = task.id;
 
-                    // Guardian TTFT event 201: the engine has taken the
-                    // request. Before slot selection, matching the legacy fork
-                    // (8d7a5affe emitted it at the top of this case), so that
-                    // `201 - 200` stays pure transport and does not absorb slot
-                    // scheduling. Once per task: a deferred task comes back
-                    // through here.
-                    if (!task.outb_sent) {
-                        task.outb_sent = true;
-                        guardian_port_event(task.params.outb_id,
-                                            GUARDIAN_EVENT_ENGINE_RECV);
-                    }
-
                     server_slot * slot = get_available_slot(task);
 
                     //
@@ -4070,6 +4066,16 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
     auto completion_id = gen_chatcmplid();
     auto & rd = res->rd;
     auto & params = this->params;
+
+    // Guardian TTFT event 201: the engine has the request and has parsed it,
+    // before it does any per-request work. This is where the shm frontend
+    // emits its own 201 (guardian-shm.cpp, before tokenize_input_prompts()),
+    // and matching it is what makes `201 - 200` the same span on both
+    // transports. Read straight from the body rather than from the evaluated
+    // schema, because that evaluation is itself inside the interval this event
+    // opens. Emitted once per HTTP request, so a deferred task cannot repeat
+    // it. See tests/golden/deviations.md for what moved and why.
+    guardian_port_event(json_value(data, "outb_id", -1), GUARDIAN_EVENT_ENGINE_RECV);
 
     res->set_req(&req); // will also set spipe if needed
 

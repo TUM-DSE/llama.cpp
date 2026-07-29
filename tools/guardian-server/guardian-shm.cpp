@@ -310,11 +310,12 @@ void guardian_shm_frontend::handle_request(int slot_idx) {
         // This frontend emits its own 201/202 at the shared-memory boundary
         // (pickup above, and after the response is copied, just before
         // sem_post). The request JSON also carries `outb_id` for the HTTP
-        // transport, and the schema would hand it to the generic server paths,
-        // which now instrument themselves too — six events per request instead
-        // of four, with the middle pair measuring llama.cpp's task handling
-        // rather than this transport. The shm events are the ones that
-        // describe shm, so the generic ones are switched off here.
+        // transport, and the schema would hand it to `server_response::send()`,
+        // which emits 202 for any task carrying one — five events per request
+        // instead of four, the extra one measuring llama.cpp's result handoff
+        // rather than this transport. 201 no longer needs suppressing (it is
+        // emitted in `handle_completions_impl()`, which this path does not
+        // call), but 202 does, and the same field gates both.
         task.params.outb_id  = -1;
 
         rd.post_task(std::move(task), /*front=*/prio <= 1);

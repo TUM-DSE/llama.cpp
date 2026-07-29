@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.h"
+#include "guardian-queue-timing.h"
 #include "llama.h"
 
 #include <string>
@@ -166,6 +167,13 @@ struct server_task {
 
     server_task_type type;
 
+    // Guardian: where a request's wall-clock time goes before prefill starts —
+    // ready-queue and deferred-queue waits, reported in the response timings.
+    // Ported from the legacy fork (42e1e4aef, 792b07294), whose absence here
+    // left ~35-45 ms per request unaccounted for in TTFT. The transitions live
+    // in guardian-queue-timing.h, driven from server-queue.cpp.
+    guardian_queue_clock guardian_clock;
+
     // used by SERVER_TASK_TYPE_SLOT_SAVE, SERVER_TASK_TYPE_SLOT_RESTORE, SERVER_TASK_TYPE_SLOT_ERASE
     struct slot_action {
         int id_slot;
@@ -180,11 +188,6 @@ struct server_task {
     // used by SERVER_TASK_TYPE_SET_LORA
     std::map<int, float> set_lora; // mapping adapter ID -> scale
 
-    // Guardian TTFT: set once event 201 has been written for this task. A task
-    // that finds no free slot is deferred and processed again, and the legacy
-    // measurement is the *first* time the engine took the request.
-    bool outb_sent = false;
-
     server_task() = default;
 
     server_task(server_task_type type) : type(type) {}
@@ -195,6 +198,22 @@ struct server_task {
 
     bool need_embd() const {
         switch (type) {
+            case SERVER_TASK_TYPE_EMBEDDING:
+            case SERVER_TASK_TYPE_RERANK:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    // Guardian: the task types that occupy a slot, and so are the ones that can
+    // queue or be deferred waiting for one. This is the same group
+    // `process_single_task()` dispatches on; the legacy fork had a single
+    // SERVER_TASK_TYPE_INFERENCE covering all four.
+    bool needs_slot() const {
+        switch (type) {
+            case SERVER_TASK_TYPE_COMPLETION:
+            case SERVER_TASK_TYPE_INFILL:
             case SERVER_TASK_TYPE_EMBEDDING:
             case SERVER_TASK_TYPE_RERANK:
                 return true;
@@ -285,6 +304,11 @@ struct result_timings {
     // Optional speculative metrics - only included when > 0
     int32_t draft_n = 0;
     int32_t draft_n_accepted = 0;
+
+    // Guardian: pre-prefill wall clock, see server_task. Always emitted, so a
+    // consumer can tell "not queued" from "server does not report queueing".
+    double queued_time_ms   = 0.0;
+    double deferred_time_ms = 0.0;
 
     json to_json() const;
 };

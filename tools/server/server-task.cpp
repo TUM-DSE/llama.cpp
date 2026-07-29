@@ -250,6 +250,11 @@ json result_timings::to_json() const {
         {"predicted_ms",           predicted_ms},
         {"predicted_per_token_ms", predicted_per_token_ms},
         {"predicted_per_second",   predicted_per_second},
+
+        // Guardian pre-prefill accounting; `agent_simple_infer.py` reads these
+        // as scheduling_delay_ms / batching_delay_ms
+        {"queued_time_ms",         queued_time_ms},
+        {"deferred_time_ms",       deferred_time_ms},
     };
 
     if (draft_n > 0) {
