@@ -32,6 +32,27 @@
 // Deferred time, and any ready-queue time after a re-dispatch, are inside
 // `202 - 201` on both.
 
+// STAGE STAMPS (the 201→202 accounting, PLAN_REMAINING Phase 10). The queue
+// intervals above never explained the measured round trips (ready-queue
+// 0.1–0.2 ms, slot-wait 0, yet 34–46 ms of `202 - 201` unattributed on
+// 2026-07-29), so the clock also records three wall-clock points:
+//
+//   t_recv_us        the transport's event 201 — request parsed, no
+//                    per-request work done yet. Set by the transport
+//                    (handle_completions_impl() / guardian-shm.cpp), because
+//                    only it knows when 201 was emitted.
+//   t_post_us        first entry into the ready queue. `prep` (tokenization,
+//                    schema evaluation, task construction) is
+//                    t_post - t_recv.
+//   t_last_leave_us  the most recent departure from either queue. `launch`
+//                    (slot selection, prompt setup, batch admission) is
+//                    t_start_process_prompt - t_last_leave.
+//
+// Stamps rather than banked intervals: the spans they delimit end at points
+// this struct never sees (prompt start lives on the slot, 202 on the result),
+// so the subtraction has to happen where both ends are visible
+// (server_slot::get_timings(), result_timings::to_json()).
+
 #include <cstdint>
 
 struct guardian_queue_clock {
@@ -42,10 +63,17 @@ struct guardian_queue_clock {
     int64_t deferred_us_start = 0;
     double  deferred_ms       = 0.0;
 
+    int64_t t_recv_us       = 0;  // event 201; set by the transport
+    int64_t t_post_us       = 0;  // first open_queued()
+    int64_t t_last_leave_us = 0;  // latest bank_queued()/bank_deferred()
+
     // entering the ready queue: on post, or on coming back from deferred
     void open_queued(int64_t now_us) {
         queued_open     = true;
         queued_us_start = now_us;
+        if (t_post_us == 0) {
+            t_post_us = now_us;
+        }
     }
 
     // leaving the ready queue; a no-op if the clock is already closed
@@ -53,6 +81,7 @@ struct guardian_queue_clock {
         if (queued_open) {
             queued_ms  += (now_us - queued_us_start) / 1000.0;
             queued_open = false;
+            t_last_leave_us = now_us;
         }
     }
 
@@ -65,6 +94,7 @@ struct guardian_queue_clock {
         if (deferred_open) {
             deferred_ms  += (now_us - deferred_us_start) / 1000.0;
             deferred_open = false;
+            t_last_leave_us = now_us;
         }
     }
 

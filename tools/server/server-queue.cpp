@@ -371,6 +371,11 @@ void server_response::send(server_task_result_ptr && result) {
             // fork used (8d7a5affe), and the closest HTTP analogue to the shm
             // server's 202, which fires just before its sem_post().
             const int trace_id = result->outb_id;
+            // same boundary on the server clock, for handoff_ms /
+            // server_e2e_ms; serialization happens after this on the HTTP
+            // thread, so the stamp reaches the response body. The shm
+            // frontend re-stamps it at its own, later 202 boundary.
+            result->guardian_t_send_us = ggml_time_us();
 
             queue_results.emplace_back(std::move(result));
             guardian_port_event(trace_id, GUARDIAN_EVENT_ENGINE_SEND);

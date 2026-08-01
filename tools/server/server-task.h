@@ -310,7 +310,20 @@ struct result_timings {
     double queued_time_ms   = 0.0;
     double deferred_time_ms = 0.0;
 
-    json to_json() const;
+    // Guardian stage accounting closing the traced `202 - 201` interval
+    // (guardian-queue-timing.h has the map). -1 / 0 = not measured — an
+    // untraced transport or a task the stamps never reached — and the field
+    // is then omitted, unlike the two always-emitted intervals above.
+    double  prep_ms             = -1.0;  // 201 → task posted
+    double  launch_ms           = -1.0;  // left the queues → prompt start
+    int64_t guardian_t_recv_us  = 0;     // event-201 stamp, for server_e2e_ms
+    int64_t guardian_t_ready_us = 0;     // result construction (get_timings)
+
+    // `guardian_t_send_us` is the transport's event-202 stamp, known only
+    // after this struct is built — the result carries it (see
+    // server_task_result) and the final-response serializers pass it in;
+    // 0 keeps the derived handoff_ms / server_e2e_ms fields out.
+    json to_json(int64_t guardian_t_send_us = 0) const;
 };
 
 struct result_prompt_progress {
@@ -331,6 +344,13 @@ struct server_task_result {
     // event 202 is written in server_response::send(), which sees results
     // rather than tasks — the same place the legacy fork wrote it.
     int32_t outb_id  = -1;
+
+    // Guardian: when this result crossed to the transport. Stamped in
+    // server_response::send() next to event 202; the shm frontend re-stamps
+    // it just before serializing, since its own 202 fires later at the
+    // shared-memory boundary. Serialization happens after either stamp, which
+    // is what lets handoff_ms / server_e2e_ms appear in the response body.
+    int64_t guardian_t_send_us = 0;
 
     // TODO @ngxson : remove this field and implement a mapping task_id -> idx in the response_reader
     size_t index = 0; // to be used for batched tasks

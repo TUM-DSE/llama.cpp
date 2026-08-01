@@ -237,7 +237,7 @@ common_chat_msg task_result_state::update_chat_msg(
 // result_timings
 //
 
-json result_timings::to_json() const {
+json result_timings::to_json(int64_t guardian_t_send_us) const {
     json base = {
         {"cache_n",                cache_n},
 
@@ -260,6 +260,25 @@ json result_timings::to_json() const {
     if (draft_n > 0) {
         base["draft_n"] = draft_n;
         base["draft_n_accepted"] = draft_n_accepted;
+    }
+
+    // Guardian stage accounting (server-task.h): emitted only when measured.
+    // Together with the four fields above these close the traced `202 - 201`
+    // span: prep + queued + deferred + launch + prompt + predicted + handoff
+    // ≈ server_e2e; what the sum leaves of server_e2e is genuinely
+    // unattributed server time, and benchmarks/ttft/bench.py audits exactly
+    // that.
+    if (prep_ms >= 0) {
+        base["prep_ms"] = prep_ms;
+    }
+    if (launch_ms >= 0) {
+        base["launch_ms"] = launch_ms;
+    }
+    if (guardian_t_send_us > 0 && guardian_t_ready_us > 0) {
+        base["handoff_ms"] = (guardian_t_send_us - guardian_t_ready_us) / 1000.0;
+    }
+    if (guardian_t_send_us > 0 && guardian_t_recv_us > 0) {
+        base["server_e2e_ms"] = (guardian_t_send_us - guardian_t_recv_us) / 1000.0;
     }
 
     return base;
@@ -383,7 +402,7 @@ json server_task_result_cmpl_final::to_json_non_oaicompat() {
         {"stop_type",           stop_type_to_str(stop)},
         {"stopping_word",       stopping_word},
         {"tokens_cached",       n_tokens_cached},
-        {"timings",             timings.to_json()},
+        {"timings",             timings.to_json(guardian_t_send_us)},
     };
     if (!stream && !probs_output.empty()) {
         res["completion_probabilities"] = completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs);
@@ -434,7 +453,7 @@ json server_task_result_cmpl_final::to_json_oaicompat() {
         res["__verbose"] = to_json_non_oaicompat();
     }
     if (timings.prompt_n >= 0) {
-        res.push_back({"timings", timings.to_json()});
+        res.push_back({"timings", timings.to_json(guardian_t_send_us)});
     }
 
     return res;
@@ -482,7 +501,7 @@ json server_task_result_cmpl_final::to_json_oaicompat_chat() {
         res["__verbose"] = to_json_non_oaicompat();
     }
     if (timings.prompt_n >= 0) {
-        res.push_back({"timings", timings.to_json()});
+        res.push_back({"timings", timings.to_json(guardian_t_send_us)});
     }
 
     return res;
@@ -1088,7 +1107,7 @@ json server_task_result_cmpl_partial::to_json_non_oaicompat() {
     };
     // populate the timings object when needed (usually for the last response or with timings_per_token enabled)
     if (timings.prompt_n > 0) {
-        res.push_back({"timings", timings.to_json()});
+        res.push_back({"timings", timings.to_json(guardian_t_send_us)});
     }
     if (is_progress) {
         res.push_back({"prompt_progress", progress.to_json()});
@@ -1128,7 +1147,7 @@ json server_task_result_cmpl_partial::to_json_oaicompat() {
         res["__verbose"] = to_json_non_oaicompat();
     }
     if (timings.prompt_n >= 0) {
-        res.push_back({"timings", timings.to_json()});
+        res.push_back({"timings", timings.to_json(guardian_t_send_us)});
     }
     if (is_progress) {
         res.push_back({"prompt_progress", progress.to_json()});

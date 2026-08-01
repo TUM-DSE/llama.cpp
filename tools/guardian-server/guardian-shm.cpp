@@ -285,12 +285,17 @@ void guardian_shm_frontend::handle_request(int slot_idx) {
     if (io_ok && outb_id != -1) {
         my_outl(outb_id, GUARDIAN_EVENT_PICKUP);
     }
+    // the same boundary on the server clock (matches the HTTP path's stamp in
+    // handle_completions_impl): request parsed, before tokenization — feeds
+    // prep_ms / server_e2e_ms in the response timings
+    const int64_t guardian_t_recv_us = ggml_time_us();
 
     try {
         auto rd = ctx_server->get_response_reader();
 
         server_task task = server_task(SERVER_TASK_TYPE_COMPLETION);
         task.id = rd.get_new_id();
+        task.guardian_clock.t_recv_us = guardian_t_recv_us;
         // the shm-slot → llama-task link: a pickup line with no matching
         // "new prompt" for this task id means llama.cpp holds the request
         // (deferred queue), not that the scanner missed it
@@ -340,6 +345,13 @@ void guardian_shm_frontend::handle_request(int slot_idx) {
             out = {{"error", "guardian-server terminated before completion"}};
             outcome = "terminated";
         } else {
+            // Re-stamp the send time at THIS transport's handoff: the value
+            // server_response::send() left is llama.cpp's internal result
+            // post, but this frontend's 202 fires later, after the copy into
+            // shared memory. Serialization is next, so handoff_ms /
+            // server_e2e_ms end here — short of the true 202 by the dump and
+            // memcpy, stated rather than hidden.
+            all.results[0]->guardian_t_send_us = ggml_time_us();
             out = all.results[0]->to_json();
             // also surface metrics in the fixed slot fields (additive; the
             // legacy server left them zeroed and clients parse the JSON body)

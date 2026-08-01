@@ -521,8 +521,24 @@ struct server_slot {
         // fork copied these into the slot at launch; here the slot already owns
         // the task, so there is nothing to keep in sync.
         if (task) {
-            timings.queued_time_ms   = task->guardian_clock.queued_ms;
-            timings.deferred_time_ms = task->guardian_clock.deferred_ms;
+            const auto & gc = task->guardian_clock;
+            timings.queued_time_ms   = gc.queued_ms;
+            timings.deferred_time_ms = gc.deferred_ms;
+            // stage accounting (guardian-queue-timing.h): computed here
+            // because this is where the queue stamps meet the slot's
+            // t_start_process_prompt; guarded so an untraced transport or a
+            // path the stamps never reached omits the fields instead of
+            // reporting a nonsense span
+            if (gc.t_recv_us > 0 && gc.t_post_us >= gc.t_recv_us) {
+                timings.prep_ms = (gc.t_post_us - gc.t_recv_us) / 1000.0;
+            }
+            if (gc.t_last_leave_us > 0 &&
+                    t_start_process_prompt >= gc.t_last_leave_us) {
+                timings.launch_ms =
+                        (t_start_process_prompt - gc.t_last_leave_us) / 1000.0;
+            }
+            timings.guardian_t_recv_us  = gc.t_recv_us;
+            timings.guardian_t_ready_us = ggml_time_us();
         }
 
         return timings;
@@ -4076,6 +4092,9 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
     // opens. Emitted once per HTTP request, so a deferred task cannot repeat
     // it. See tests/golden/deviations.md for what moved and why.
     guardian_port_event(json_value(data, "outb_id", -1), GUARDIAN_EVENT_ENGINE_RECV);
+    // the same boundary on the server's own clock, so the response can carry
+    // prep_ms / server_e2e_ms (guardian-queue-timing.h)
+    const int64_t guardian_t_recv_us = ggml_time_us();
 
     res->set_req(&req); // will also set spipe if needed
 
@@ -4119,6 +4138,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             server_task task = server_task(type);
 
             task.id = rd.get_new_id();
+            task.guardian_clock.t_recv_us = guardian_t_recv_us;
 
             task.tokens = std::move(inputs[i]);
             task.params = server_schema::eval_llama_cmpl_schema(
